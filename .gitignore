@@ -1,0 +1,61 @@
+/Novel_Src
+/.venv
+/build
+/dist
+/.vscode
+/__pycache__
+__pycache__/
+*.pyc
+/markdown
+/vectorstore
+/example
+config.json
+config_test.json
+.env
+.env.*
+!.env.example
+novelflow-profiles.json
+novelflow-project.json
+novelflow-projects.json
+novelflow.db
+novelflow.db-shm
+novelflow.db-wal
+novelflow-secrets.json
+.idea/
+/novel
+app.log
+test.py
+/backup
+/.novelflow-models
+/.novelflow-vectors
+uv.lock
+.python-version
+pyproject.toml
+# Frontend dependencies and build output
+**/node_modules/
+**/dist/
+
+# Local browser / QA profiles
+**/.qa-chrome-profile/
+**/.qa-chrome-profile-2/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+# Logs
+*.log
+
+# Frontend dependencies and build output
+**/node_modules/
+**/dist/
+
+# Local browser / QA profiles
+**/.qa-chrome-profile/
+**/.qa-chrome-profile-2/
+
+# macOS
+.DS_Store
+.vite/
+**/.vite/

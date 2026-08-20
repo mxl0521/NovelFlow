@@ -1,0 +1,34 @@
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.landing-page { position: relative; display: flex; min-height: 100vh; height: 100svh; overflow: hidden; flex-direction: column; align-items: center; padding: 30px 48px 16px; color: #172a3d; background: #f5f0e7; isolation: isolate; }
+.landing-page::before { position: absolute; inset: 0; z-index: -2; opacity: .12; background: repeating-linear-gradient(112deg, transparent 0 61px, rgba(104, 91, 70, .08) 62px, transparent 64px); content: ''; }
+.landing-grain { position: absolute; left: -16px; bottom: 4%; z-index: -1; width: 170px; height: 115px; opacity: .12; border-radius: 50%; background: #8e806d; filter: blur(18px); transform: rotate(-20deg); }
+.landing-brand { display: flex; align-items: center; align-self: flex-start; gap: 9px; color: #13263a; font-family: Georgia, "Times New Roman", serif; font-size: 20px; letter-spacing: .01em; }
+.landing-feather { color: #13263a; font-size: 17px; line-height: 1; transform: rotate(-24deg); }
+.landing-quill { position: absolute; right: 7%; top: 8%; width: min(260px, 22vw); height: 280px; }
+.landing-copy { align-self: flex-start; width: min(1200px, 100%); margin: 4vh auto 0; }
+.landing-copy h1 { max-width: 700px; margin: 0; color: #172a3d; font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; font-size: clamp(42px, 4vw, 56px); font-weight: 400; line-height: 1.35; letter-spacing: 0; }
+.landing-subtitle { margin: 14px 0 0; color: #78818b; font-family: "Songti SC", "STSong", serif; font-size: 14px; letter-spacing: .04em; }
+.landing-paper { position: relative; display: flex; width: min(760px, calc(100vw - 48px)); margin: 2.5vh auto 0; flex-direction: column; align-items: center; padding: 22px 52px 20px; border: 1px solid #ddd3c3; border-radius: 18px; background: rgba(251, 248, 241, .96); box-shadow: 0 16px 40px rgba(60, 45, 25, .1), inset 0 0 0 7px rgba(255, 252, 246, .42); }
+.landing-paper::before { position: absolute; inset: 9px; border: 1px solid rgba(190, 171, 144, .32); border-radius: 12px; pointer-events: none; content: ''; }
+.landing-paper-mark { color: #9f8c70; font-size: 20px; transform: rotate(-20deg); }
+.landing-paper h2 { margin: 4px 0 12px; color: #172a3d; font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; font-size: clamp(26px, 2.5vw, 32px); font-weight: 400; line-height: 1.35; text-align: center; }
+.landing-input-wrap { position: relative; z-index: 1; width: 100%; }
+.landing-input-wrap textarea { display: block; width: 100%; min-height: 140px; height: 140px; padding: 16px; resize: none; border: 1px solid #ddd3c3; border-radius: 11px; outline: 0; color: #26394c; background: rgba(251, 248, 241, .72); font-family: "Songti SC", "STSong", serif; font-size: 15px; line-height: 1.8; }
+.landing-input-wrap textarea::placeholder { color: #9a958c; }
+.landing-input-wrap textarea:focus { border-color: #78818b; box-shadow: 0 0 0 3px rgba(24, 50, 74, .1); }
+.landing-start { position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: min(340px, 100%); min-height: 48px; margin-top: 16px; border: 1px solid #18324a; border-radius: 9px; color: #fff; background: #18324a; box-shadow: 0 7px 12px rgba(29, 49, 70, .14); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; letter-spacing: .08em; transition: background .18s ease, transform .18s ease, box-shadow .18s ease; }
+.landing-start:hover { background: #102437; box-shadow: 0 10px 17px rgba(29, 49, 70, .24); transform: translateY(-1px); }
+.landing-start span { font-size: 17px; transform: rotate(-20deg); }
+.landing-quote { margin: 14px 0 0; color: #78818b; font-family: "Songti SC", "STSong", serif; font-size: 12px; line-height: 1.65; letter-spacing: .06em; text-align: center; }
+.landing-quote cite { font-size: 12px; }
+.landing-footer { display: flex; align-items: center; gap: 7px; margin-top: auto; color: #283b4d; font-family: Georgia, "Times New Roman", serif; font-size: 16px; }
+.landing-footer .landing-feather { font-size: 18px; }
+@media (max-width: 700px) {
+  .landing-page { height: auto; min-height: 100svh; padding: 28px 18px 24px; overflow: visible; }
+  .landing-copy { margin-top: 10vh; }
+  .landing-copy h1 { font-size: clamp(36px, 10vw, 52px); }
+  .landing-subtitle { font-size: 13px; }
+  .landing-paper { width: 100%; margin-top: 6vh; padding: 30px 20px 26px; }
+  .landing-paper h2 { font-size: 28px; }
+  .landing-quote { margin-top: 22px; font-size: 11px; }
+}

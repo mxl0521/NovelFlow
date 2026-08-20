@@ -1,0 +1,531 @@
+/* AI collaboration workspace overhaul: readable summaries first, details on demand. */
+body.nf-collab-v2 .workspace {
+  padding-bottom: 48px;
+}
+
+body.nf-collab-v2 .view-page[aria-label="AI 编辑团队"] {
+  gap: 22px;
+  max-width: 1260px;
+}
+
+body.nf-collab-v2 .view-page[aria-label="AI 编辑团队"] > .view-head {
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+body.nf-collab-v2 .view-page[aria-label="AI 编辑团队"] > .view-head h1 {
+  font-size: 28px;
+  line-height: 1.35;
+}
+
+body.nf-collab-v2 .view-page[aria-label="AI 编辑团队"] > .view-head p {
+  font-size: 13px;
+}
+
+body.nf-collab-v2 .workflow-presets {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+body.nf-collab-v2 .workflow-presets button {
+  min-height: 80px;
+  padding: 13px 12px;
+  border-radius: 9px;
+}
+
+body.nf-collab-v2 .workflow-presets strong {
+  font-size: 13px;
+}
+
+body.nf-collab-v2 .workflow-presets small {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.nf-collab-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.nf-collab-advanced-toggle span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.nf-collab-advanced-toggle button {
+  border: 1px solid #bfd3c8;
+  border-radius: 6px;
+  color: #17654e;
+  background: #f7fbf8;
+  min-height: 32px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body.nf-collab-v2 .agent-picker-heading,
+body.nf-collab-v2 .agent-picker {
+  display: none;
+}
+
+body.nf-collab-v2 .view-page.nf-advanced-open .agent-picker-heading,
+body.nf-collab-v2 .view-page.nf-advanced-open .agent-picker {
+  display: flex;
+}
+
+body.nf-collab-v2 .view-page.nf-advanced-open .agent-picker {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+body.nf-collab-v2 .workflow-task-center {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+body.nf-collab-v2 .workflow-task-center .section-heading {
+  margin-bottom: 12px;
+}
+
+body.nf-collab-v2 .task-list article {
+  min-height: 58px;
+}
+
+.nf-agent-run-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 13px;
+  margin: 15px 0 9px;
+  border: 1px solid #cfe0d7;
+  border-radius: 8px;
+  color: #315647;
+  background: #f5faf7;
+  font-size: 12px;
+}
+
+.nf-agent-run-summary b {
+  color: var(--green);
+}
+
+body.nf-collab-v2 .workflow-board {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+body.nf-collab-v2 .workflow-board > div {
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-content: start;
+  gap: 8px;
+  min-height: 122px;
+  padding: 14px;
+  border-radius: 9px;
+}
+
+body.nf-collab-v2 .workflow-board > div.muted {
+  display: none;
+}
+
+body.nf-collab-v2 .workflow-board span {
+  width: 25px;
+  height: 25px;
+}
+
+body.nf-collab-v2 .workflow-board strong {
+  padding-top: 3px;
+  font-size: 13px;
+}
+
+body.nf-collab-v2 .workflow-board p {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.nf-agent-detail-button {
+  grid-column: 1 / -1;
+  justify-self: start;
+  border: 1px solid #bad7c7;
+  border-radius: 5px;
+  color: #17654e;
+  background: #fff;
+  min-height: 29px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+body.nf-collab-v2 .workflow-result {
+  gap: 16px;
+  padding: 20px;
+  border-radius: 10px;
+}
+
+.nf-collab-result-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.nf-collab-result-summary > div {
+  min-height: 82px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.nf-collab-result-summary small {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.nf-collab-result-summary b {
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.nf-collab-result-summary span {
+  margin-left: 5px;
+  color: var(--green);
+  font-size: 11px;
+}
+
+body.nf-collab-v2 .agent-acceptance {
+  padding: 2px 0 11px;
+  border-bottom: 1px solid #e7eeea;
+}
+
+body.nf-collab-v2 .decision-acceptance {
+  display: none;
+}
+
+.nf-decision-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.nf-decision-group {
+  min-height: 142px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.nf-decision-group header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  margin-bottom: 10px;
+}
+
+.nf-decision-group strong {
+  font-size: 13px;
+}
+
+.nf-decision-group em {
+  color: var(--green);
+  background: var(--green-soft);
+  border-radius: 99px;
+  padding: 4px 7px;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.nf-decision-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #52645b;
+  font-size: 12px;
+  line-height: 1.65;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.nf-decision-group button {
+  margin-top: 11px;
+  border: 1px solid #b7d5c4;
+  border-radius: 5px;
+  color: #17654e;
+  background: #f8fcf9;
+  min-height: 29px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.nf-collab-modal-backdrop {
+  position: fixed;
+  z-index: 10050;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 33, 27, .34);
+}
+
+.nf-collab-modal {
+  width: min(860px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 22px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(17, 36, 27, .28);
+}
+
+.nf-collab-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.nf-collab-modal h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.nf-collab-modal p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.nf-collab-modal-close {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: #52645b;
+  background: #fff;
+  min-width: 32px;
+  height: 32px;
+  font-size: 18px;
+}
+
+.nf-collab-modal-content {
+  display: grid;
+  gap: 10px;
+  padding-top: 16px;
+}
+
+.nf-collab-modal-copy {
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid #e0e8e3;
+  border-radius: 7px;
+  color: #35463d;
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.85;
+}
+
+.nf-decision-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.nf-decision-row.selected {
+  border-color: #78b69b;
+  background: #f4faf6;
+}
+
+.nf-decision-row input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--green);
+}
+
+.nf-decision-row span {
+  color: #3d5045;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+body.nf-collab-v2 .assistant-panel {
+  min-width: 400px;
+}
+
+body.nf-collab-v2 .assistant-header {
+  padding-bottom: 12px;
+}
+
+.nf-assistant-context {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 18px 10px;
+  padding: 9px 10px;
+  border: 1px solid #d6e5dc;
+  border-radius: 7px;
+  color: #35715a;
+  background: #f3faf6;
+  font-size: 11px;
+}
+
+.nf-assistant-context i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #42a77b;
+}
+
+body.nf-collab-v2 .assistant-panel .message-list {
+  gap: 12px;
+}
+
+body.nf-collab-v2 .assistant-panel .chat-bubble,
+body.nf-collab-v2 .assistant-panel .message {
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.nf-assistant-quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 18px 12px;
+}
+
+.nf-assistant-quick-prompts button {
+  border: 1px solid #c8ddd1;
+  border-radius: 99px;
+  color: #17654e;
+  background: #f7fbf8;
+  min-height: 28px;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.nf-assistant-quick-prompts button:hover {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+@media (max-width: 1400px) {
+  body.nf-collab-v2 .workflow-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  body.nf-collab-v2 .assistant-panel { min-width: 360px; }
+}
+
+@media (max-width: 1120px) {
+  body.nf-collab-v2 .workflow-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body.nf-collab-v2 .workflow-board,
+  .nf-decision-groups { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 660px) {
+  body.nf-collab-v2 .workflow-presets,
+  .nf-collab-result-summary { grid-template-columns: 1fr; }
+  body.nf-collab-v2 .workflow-board > div { min-height: 112px; }
+  .nf-collab-modal-backdrop { padding: 12px; }
+  .nf-collab-modal { padding: 16px; }
+}
+/* Chapter tree: keep every row readable when rename/delete actions are present. */
+.sidebar .chapter-row {
+  grid-template-columns: 28px minmax(0, 1fr) 44px 24px 24px !important;
+  min-width: 0 !important;
+  min-height: 40px !important;
+  height: 40px !important;
+  align-items: center !important;
+  gap: 6px !important;
+  overflow: hidden !important;
+}
+
+.sidebar .chapter-number,
+.sidebar .chapter-name,
+.sidebar .chapter-status,
+.sidebar .chapter-rename-button,
+.sidebar .chapter-delete-button {
+  min-width: 0 !important;
+}
+
+.sidebar .chapter-number {
+  width: 28px;
+  overflow: hidden;
+  text-align: center;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.sidebar .chapter-name {
+  display: block !important;
+  width: 100%;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  line-height: 1.25 !important;
+  font-size: 12px !important;
+}
+
+.sidebar .chapter-status {
+  display: block;
+  width: 44px;
+  max-width: 44px;
+  margin-left: 0 !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 10px !important;
+}
+
+.sidebar .chapter-rename-button,
+.sidebar .chapter-delete-button {
+  display: grid !important;
+  place-items: center;
+  width: 24px !important;
+  height: 24px !important;
+  flex: 0 0 24px;
+  overflow: hidden;
+  line-height: 1;
+}
+
+@media (max-width: 1120px) {
+  .sidebar .chapter-row {
+    grid-template-columns: 26px minmax(0, 1fr) 40px 22px 22px !important;
+    gap: 5px !important;
+  }
+
+  .sidebar .chapter-number { width: 26px; }
+  .sidebar .chapter-status { width: 40px; max-width: 40px; }
+  .sidebar .chapter-rename-button,
+  .sidebar .chapter-delete-button {
+    width: 22px !important;
+    height: 22px !important;
+    flex-basis: 22px;
+  }
+}
+
+/* Keep detail dialogs above the React workspace and assistant layers. */
+.nf-collab-modal-backdrop {
+  z-index: 2147483000 !important;
+}
