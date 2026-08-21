@@ -28,6 +28,7 @@ test.py
 /backup
 /.novelflow-models
 /.novelflow-vectors
+.pnpm-store/
 uv.lock
 .python-version
 pyproject.toml

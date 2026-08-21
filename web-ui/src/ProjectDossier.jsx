@@ -10,7 +10,7 @@ function DossierList({ icon: Icon, title, items }) {
 }
 
 function ProjectDossier({ project, projectKit, onClose }) {
-  const mode = projectKit.mode === 'demo' ? '本地演示档案' : 'GPT 已生成档案'
+  const mode = '作品创作档案'
 
   return (
     <div className="modal-backdrop dossier-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>

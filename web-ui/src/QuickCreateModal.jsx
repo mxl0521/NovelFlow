@@ -33,7 +33,7 @@ function QuickCreateModal({ onClose, onProfessional, onClarify, onGenerate, onCr
   const [questions, setQuestions] = useState(null)
   const [answers, setAnswers] = useState({})
   const [blueprint, setBlueprint] = useState(null)
-  const [mode, setMode] = useState('demo')
+  const [mode, setMode] = useState('model')
   const [busyTask, setBusyTask] = useState('')
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const generationController = useRef(null)
@@ -85,7 +85,7 @@ function QuickCreateModal({ onClose, onProfessional, onClarify, onGenerate, onCr
     try {
       const result = await onGenerate(settingsOverride, feedback, { signal: controller.signal })
       if (!result?.blueprint?.options?.length) throw new Error('故事方案生成失败，请重试')
-      setBlueprint(result.blueprint); setMode(result.mode || 'demo')
+      setBlueprint(result.blueprint); setMode(result.mode || 'model')
     } catch (generationError) {
       setError(generationError.name === 'AbortError' ? '已停止生成。你的输入仍然保留，可以调整后重新生成。' : (generationError.message || '故事方案生成失败，请重试'))
     } finally {

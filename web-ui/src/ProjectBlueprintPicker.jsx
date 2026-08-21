@@ -28,7 +28,7 @@ function ProjectBlueprintPicker({ blueprint, mode, busy, onRegenerate, onConfirm
     <div className="blueprint-view">
       <div className="wizard-step blueprint-intro">
         <h2>先选一个创作方向</h2>
-        <p>{mode === 'demo' ? '当前展示的是本地演示方案，配置 GPT 模型后会按你的设定生成真实方案。' : '这三套方向由创作总编根据你的设定生成，并且分别采用不同的叙事重心。选定后才会创建作品，不满意可以继续调整。'}</p>
+        <p>{mode === 'fallback' ? '模型暂时没有返回完整结构，请检查配置后重试。' : '这三套方向由创作总编根据你的设定生成，并且分别采用不同的叙事重心。选定后才会创建作品，不满意可以继续调整。'}</p>
       </div>
       <div className="blueprint-grid">
         {blueprint.options.map((option) => <BlueprintCard key={option.id} option={option} selected={option.id === selectedId} onSelect={() => setSelectedId(option.id)} />)}

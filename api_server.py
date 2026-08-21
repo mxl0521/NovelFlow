@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from xml.sax.saxutils import escape as xml_escape
 
 from agent_skills import AGENT_SKILL_VERSION, PACK_SKILL_VERSION, SKILL_SCHEMA_VERSION, CORE_AGENT_SKILLS, agent_skill, creative_profile, public_agent_skills, public_creative_options, selected_skill_text
@@ -70,6 +70,7 @@ MAX_CHAPTER_BODY_BYTES = max(256_000, int(os.getenv("NOVELFLOW_MAX_CHAPTER_BODY_
 MAX_MESSAGE_CHARS = 4_000
 MAX_CONTEXT_CHARS = 12_000
 MAX_BOOTSTRAP_CHARS = 10_000
+ASSISTANT_HISTORY_LIMIT = 60
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
 
@@ -144,6 +145,10 @@ def renumber_project_chapters(project: dict[str, Any]) -> dict[str, str]:
     }
     for index, chapter in enumerate(chapters, 1):
         chapter["id"] = str(index).zfill(width)
+        title = str(chapter.get("title", ""))
+        # Keep author-written titles intact, but keep generated "第 N 章" prefixes
+        # aligned with the chapter's new position after a delete or restore.
+        chapter["title"] = re.sub(r"^(第\s*)\d+(\s*章(?:\s*[·．、:：-]\s*)?)", rf"\g<1>{index}\g<2>", title, count=1)
     remap_project_chapter_references(project, id_map)
     return id_map
 
@@ -389,6 +394,7 @@ DEFAULT_PROJECT = {
         "decisions": [], "decision_items": [], "workflow_tasks": [],
         "chapter_trash": [], "memory_evidence": [], "event_log": [],
         "event_tasks": [], "chapter_versions": {},
+        "assistant_threads": {},
         "continuity_board": {"characters": [], "foreshadows": []},
         "story_arcs": [], "timeline": [],
         "entities": {"locations": [], "items": [], "organizations": [], "abilities": []},
@@ -432,7 +438,7 @@ def load_project() -> dict[str, Any]:
             if isinstance(chapter, dict):
                 chapter.setdefault("revision", 0)
         memory = project["memory"]
-        for key, default in (("workflow_tasks", []), ("memory_evidence", []), ("event_log", []), ("event_tasks", []), ("decisions", []), ("decision_items", []), ("continuity_board", {"characters": [], "foreshadows": []})):
+        for key, default in (("workflow_tasks", []), ("memory_evidence", []), ("event_log", []), ("event_tasks", []), ("decisions", []), ("decision_items", []), ("assistant_threads", {}), ("continuity_board", {"characters": [], "foreshadows": []})):
             if not isinstance(memory.get(key), type(default)):
                 memory[key] = json.loads(json.dumps(default, ensure_ascii=False))
         return project
@@ -500,6 +506,7 @@ def ensure_project_schema(project: dict[str, Any]) -> None:
         "decisions": [],
         "decision_items": [],
         "chapter_versions": {},
+        "assistant_threads": {},
         "continuity_board": {"characters": [], "foreshadows": []},
         "story_arcs": [],
         "timeline": [],
@@ -511,6 +518,9 @@ def ensure_project_schema(project: dict[str, Any]) -> None:
     for chapter in project.get("chapters", []):
         if isinstance(chapter, dict):
             chapter.setdefault("revision", 0)
+    for index, chapter in enumerate(_project_chapters(project), 1):
+        title = str(chapter.get("title", ""))
+        chapter["title"] = re.sub(r"^(第\s*)\d+(\s*章(?:\s*[·．、:：-]\s*)?)", rf"\g<1>{index}\g<2>", title, count=1)
 
 
 def project_metadata(project: dict[str, Any], active_id: str) -> dict[str, Any]:
@@ -870,6 +880,51 @@ def blueprint_chapter_seed(outline: list[dict[str, Any]], option: dict[str, Any]
     ]
 
 
+def assistant_thread_history(chapter_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    """Return bounded, persisted assistant messages for one chapter."""
+    memory = PROJECT.get("memory", {}) if isinstance(PROJECT.get("memory"), dict) else {}
+    threads = memory.get("assistant_threads", {})
+    records = threads.get(chapter_id, []) if isinstance(threads, dict) else []
+    if not isinstance(records, list):
+        return []
+    clean: list[dict[str, Any]] = []
+    for item in records[-max(1, limit):]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        record: dict[str, Any] = {"role": item["role"], "content": content[:MAX_MESSAGE_CHARS]}
+        for key in ("createdAt", "chapterId", "instruction"):
+            if item.get(key):
+                record[key] = str(item[key])[:MAX_MESSAGE_CHARS]
+        if isinstance(item.get("evidence"), list):
+            record["evidence"] = [entry for entry in item["evidence"][:4] if isinstance(entry, dict)]
+        clean.append(record)
+    return clean
+
+
+def persist_assistant_exchange(chapter_id: str, user_message: str, assistant_reply: str, evidence: list[dict[str, Any]]) -> None:
+    """Persist a completed assistant exchange without allowing unbounded project growth."""
+    now = datetime.now(timezone.utc).isoformat()
+    with project_lock:
+        memory = PROJECT.setdefault("memory", {})
+        threads = memory.setdefault("assistant_threads", {})
+        if not isinstance(threads, dict):
+            threads = {}
+            memory["assistant_threads"] = threads
+        thread = threads.setdefault(chapter_id, [])
+        if not isinstance(thread, list):
+            thread = []
+            threads[chapter_id] = thread
+        thread.extend([
+            {"role": "user", "content": user_message[:MAX_MESSAGE_CHARS], "createdAt": now, "chapterId": chapter_id},
+            {"role": "assistant", "content": assistant_reply[:MAX_MESSAGE_CHARS], "evidence": evidence[:4], "instruction": user_message[:MAX_MESSAGE_CHARS], "createdAt": now, "chapterId": chapter_id},
+        ])
+        threads[chapter_id] = thread[-ASSISTANT_HISTORY_LIMIT:]
+        save_project(PROJECT)
+
+
 def build_workflow_context(chapter_id: str, draft: str) -> dict[str, Any]:
     """Build authoritative context from the active project, never from browser settings."""
     chapter = next((item for item in PROJECT.get("chapters", []) if item.get("id") == chapter_id), None)
@@ -887,6 +942,7 @@ def build_workflow_context(chapter_id: str, draft: str) -> dict[str, Any]:
         "chapter": {"id": chapter_id, "title": str(chapter.get("title", ""))[:120], "goal": str(chapter.get("goal", ""))[:1_500], "conflict": str(chapter.get("conflict", ""))[:1_500], "hook": str(chapter.get("hook", ""))[:1_500], "scenes": chapter.get("scenes", [])[:8] if isinstance(chapter.get("scenes"), list) else [], "continuity": chapter.get("continuity", {}) if isinstance(chapter.get("continuity"), dict) else {}},
         "story": {"synopsis": str(kit.get("synopsis", ""))[:2_000], "worldRules": limited_list(kit.get("worldRules", []), 8, 350), "characters": limited_list(merged_story_records(kit.get("characters", []), memory.get("characters", [])), 12, 500), "foreshadows": limited_list(merged_story_records(kit.get("foreshadows", []), memory.get("foreshadows", [])), 15, 400), "volumes": limited_list(kit.get("volumes", memory.get("volumes", [])), 6, 500), "continuityBoard": continuity_board(PROJECT), "storyArcs": limited_list(memory.get("story_arcs", memory.get("storyArcs", [])), 20, 800), "timeline": limited_list(memory.get("timeline", []), 30, 800), "entities": {key: limited_list(memory.get("entities", {}).get(key, []), 30, 800) for key in ("locations", "items", "organizations", "abilities")}},
         "retrievedMemory": memory_search(" ".join([str(chapter.get("title", "")), str(chapter.get("goal", "")), str(chapter.get("conflict", "")), str(chapter.get("hook", "")), draft[-1_000:]]), 8),
+        "assistantHistory": assistant_thread_history(chapter_id, 12),
         "recentChapters": [{"id": item.get("id"), "title": str(item.get("title", ""))[:120], "goal": str(item.get("goal", ""))[:600], "hook": str(item.get("hook", ""))[:500], "bodyEnd": str(item.get("body", ""))[-1_500:]} for item in earlier],
         "currentDraft": authoritative_draft[-8_000:],
     }
@@ -915,6 +971,7 @@ def compact_workflow_context(context: dict[str, Any], agent_id: str) -> dict[str
         "entities": {key: limited_list(story.get("entities", {}).get(key, []) if isinstance(story.get("entities"), dict) else [], 12, 350) for key in ("locations", "items", "organizations", "abilities")},
         "recentChapters": context.get("recentChapters", [])[-2:],
         "currentDraft": str(context.get("currentDraft", ""))[-6000:],
+        "assistantHistory": context.get("assistantHistory", [])[-8:],
     }
     # Every writing or review role gets evidence; the writer must not invent
     # continuity simply because a relevant fact was outside the last chapters.
@@ -1697,6 +1754,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             trash = PROJECT.get("memory", {}).get("chapter_trash", [])
             self._send_json(HTTPStatus.OK, {"chapters": list(reversed(trash[-50:])) if isinstance(trash, list) else []})
             return
+        if request_path == "/api/project/assistant/history":
+            chapter_id = str(parse_qs(urlparse(self.path).query).get("chapterId", [""])[0]).strip()
+            if not re.fullmatch(r"\d{2,}", chapter_id):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "章节编号不正确"})
+                return
+            if not any(str(item.get("id", "")) == chapter_id for item in PROJECT.get("chapters", []) if isinstance(item, dict)):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "未找到当前章节"})
+                return
+            self._send_json(HTTPStatus.OK, {"chapterId": chapter_id, "messages": assistant_thread_history(chapter_id, ASSISTANT_HISTORY_LIMIT)})
+            return
         if request_path == "/api/projects":
             self._send_json(HTTPStatus.OK, {"projects": [project_metadata(project, ACTIVE_PROJECT_ID) for project in PROJECT_REGISTRY["projects"]]})
             return
@@ -1859,9 +1926,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             context = build_workflow_context(chapter_id, "")
             context["retrievedMemory"] = memory_search(message, 8)
             context_text = json.dumps(context, ensure_ascii=False)
+            persisted_history = assistant_thread_history(chapter_id, 12)
+            conversation_history = persisted_history or clean_history
             history_text = "\n".join(
                 f"{'作者' if item['role'] == 'user' else '助手'}：{item['content']}"
-                for item in clean_history
+                for item in conversation_history[-10:]
             )
             reply = invoke_model(
                 profile,
@@ -1878,17 +1947,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 for item in context.get("retrievedMemory", [])[:4]
                 if isinstance(item, dict)
             ]
+            persist_assistant_exchange(chapter_id, message.strip(), reply, evidence)
             self._send_json(HTTPStatus.OK, {"reply": reply, "evidence": evidence})
         except Exception as exc:  # Provider errors must not expose configuration details.
             logging.error("model request failed: %s", type(exc).__name__)
-            if isinstance(exc, ProviderHTTPError) and exc.status_code >= 500:
-                self._send_json(HTTPStatus.OK, {
-                    "mode": "fallback",
-                    "reply": "中转站刚刚没有完成这次生成。我先给你一个可继续执行的建议：先明确本章主角必须做出的选择、付出的代价，以及结尾要留下的具体悬念；模型恢复后可以点击重试继续深化。",
-                    "evidence": evidence,
-                    "notice": "中转站暂时返回 502，已提供本地可继续的创作建议",
-                })
-                return
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": provider_error_message(exc)})
 
     def _assistant_action_preview(self) -> None:
@@ -1926,7 +1988,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         profile = PROFILE_BY_ID.get(profile_id)
         if profile_id == "demo" or profile is None or not profile_api_key(profile):
-            self._send_json(HTTPStatus.OK, {"mode": "local", "actions": fallback_actions()})
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "当前模型尚未配置密钥，请先在设置中配置模型"})
             return
         system_prompt = (
             "You convert a Chinese fiction author's explicit editing request into safe NovelFlow edit actions. "
@@ -1959,11 +2021,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "reason": str(item.get("reason", "")).strip()[:500],
                 })
             if not actions:
-                actions = fallback_actions()
+                raise ValueError("assistant_actions")
             self._send_json(HTTPStatus.OK, {"mode": "model", "summary": str(raw.get("summary", "修改提案"))[:300] if isinstance(raw, dict) else "修改提案", "actions": actions})
         except Exception as exc:
-            logging.warning("assistant action preview fell back locally: %s", type(exc).__name__)
-            self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "模型暂时无法整理修改范围，已生成保守的本地提案", "actions": fallback_actions()})
+            logging.warning("assistant action preview failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时无法整理修改范围，请重试"})
 
     def _generate_inspirations(self) -> None:
         if rate_limited(self.client_address[0]):
@@ -2019,12 +2081,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise ValueError("inspiration_options")
             self._send_json(HTTPStatus.OK, {"mode": "model", "options": options})
         except (ValueError, json.JSONDecodeError):
-            self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "模型结构化输出不完整，已按当前章节生成可编辑方向", "options": local_inspiration_options(context, "fallback")})
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型返回的灵感方向格式不完整，请重试"})
         except Exception as exc:
             logging.error("inspiration request failed: %s", type(exc).__name__)
-            if isinstance(exc, ProviderHTTPError) and exc.status_code >= 500:
-                self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "中转站暂时返回 502，已按当前章节生成可编辑方向；稍后可重试模型", "options": local_inspiration_options(context, "recovery")})
-                return
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": provider_error_message(exc)})
 
     def _run_workflow(self) -> None:
@@ -2181,18 +2240,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                     persist_workflow_task(task)
             except Exception as exc:
                 logging.error("workflow request failed at %s: %s", completed[-1]["id"] if completed else "start", type(exc).__name__)
-                selected_ids = {agent_id for agent_id, _ in steps_to_run}
-                completed_ids = {item.get("id") for item in completed}
-                fallback = [item for item in demo_workflow_results(context) if item["id"] in selected_ids and item["id"] not in completed_ids]
-                completed.extend(fallback)
-                mode = "fallback"
-                task["fallback"] = True
-                task["error"] = "模型结构化请求失败，已使用本地兜底结果"
+                task["error"] = "模型协作请求失败，请检查配置后重试"
                 task["steps"] = completed
                 task["completedAgentIds"] = [item["id"] for item in completed]
-                task["status"] = "completed"
+                task["status"] = "failed"
                 task["updatedAt"] = datetime.now(timezone.utc).isoformat()
                 persist_workflow_task(task)
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型协作请求失败，请检查配置后重试", "runId": run_id})
+                return
 
         writer = next((item for item in completed if item["id"] == "writer"), completed[-1])
         reviser = next((item for item in completed if item["id"] == "reviser"), None)
@@ -2678,7 +2733,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "rewrite": target_text or "沈砚望着雾中的站台，终于迈出了第一步。",
                 "condense": (target_text or "沈砚望着雾中的站台，终于迈出了第一步。")[:max(120, len(target_text) * 3 // 5)],
             }[operation]
-            self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "模型暂时没有返回，已保留可编辑的本地续写结果。", "content": fallback, "replace": operation in {"condense", "rewrite"}, "range": {"start": start, "end": end} if has_selection else None})
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时没有返回章节内容，请重试"})
 
     def _bootstrap_project(self) -> None:
         if rate_limited(self.client_address[0]):
@@ -2747,12 +2802,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"mode": "model", "blueprint": blueprint, "skillVersion": {"schema": SKILL_SCHEMA_VERSION, "agents": AGENT_SKILL_VERSION, "packs": PACK_SKILL_VERSION}})
         except (ValueError, json.JSONDecodeError):
             logging.error("bootstrap returned invalid structured output")
-            self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "模型结构化输出不完整，已生成可编辑的本地方案", "blueprint": demo_blueprint(settings, feedback), "skillVersion": {"schema": SKILL_SCHEMA_VERSION, "agents": AGENT_SKILL_VERSION, "packs": PACK_SKILL_VERSION}})
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型返回的创作方案格式不完整，请重试", "stage": "blueprint_generation"})
         except Exception as exc:
             logging.error("bootstrap request failed: %s", type(exc).__name__)
-            if isinstance(exc, ProviderHTTPError) and exc.status_code >= 500:
-                self._send_json(HTTPStatus.OK, {"mode": "fallback", "notice": "中转站暂时返回 502，已生成可编辑的本地方案；稍后可重试模型", "blueprint": demo_blueprint(settings, feedback), "skillVersion": {"schema": SKILL_SCHEMA_VERSION, "agents": AGENT_SKILL_VERSION, "packs": PACK_SKILL_VERSION}})
-                return
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": provider_error_message(exc), "stage": "blueprint_generation"})
 
     def _rename_chapter(self) -> None:
@@ -2989,7 +3041,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
         profile = PROFILE_BY_ID.get(profile_id)
         if profile_id == "demo" or profile is None or not profile_api_key(profile):
-            self._send_json(HTTPStatus.OK, {"mode": "local", "memoryPatch": fallback})
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "当前模型尚未配置密钥，请先在设置中配置模型"})
             return
         try:
             prompt = (
@@ -3011,8 +3063,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 memory_patch[key] = [str(item).strip()[:800] for item in values[:10] if str(item).strip()] if isinstance(values, list) else fallback[key]
             self._send_json(HTTPStatus.OK, {"mode": "model", "memoryPatch": memory_patch})
         except Exception as exc:
-            logging.warning("memory preview fell back locally: %s", type(exc).__name__)
-            self._send_json(HTTPStatus.OK, {"mode": "local", "memoryPatch": fallback, "notice": "模型提取暂时不可用，已生成可编辑的本地记忆草稿"})
+            logging.warning("memory preview failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时无法整理长期记忆，请重试"})
 
     def _create_chapter(self) -> None:
         global PROJECT

@@ -31,7 +31,7 @@ function NewProjectWizard({ creativeOptions, onClose, onClarify, onGenerate, onC
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
   const [blueprint, setBlueprint] = useState(null)
-  const [mode, setMode] = useState('demo')
+  const [mode, setMode] = useState('model')
   const [error, setError] = useState('')
   const [clarifyingQuestions, setClarifyingQuestions] = useState(null)
   const [clarificationAnswers, setClarificationAnswers] = useState({})
@@ -84,7 +84,7 @@ function NewProjectWizard({ creativeOptions, onClose, onClarify, onGenerate, onC
       const result = await onGenerate(finalizedSettings(settings), feedback)
       if (!result?.blueprint?.options?.length) throw new Error('方案生成失败，请稍后重试')
       setBlueprint(result.blueprint)
-      setMode(result.mode || 'demo')
+      setMode(result.mode || 'model')
     } catch (generationError) {
       setError(generationError.message || '方案生成失败，请稍后重试')
     } finally {

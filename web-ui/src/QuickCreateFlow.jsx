@@ -1,0 +1,32 @@
+import { ArrowLeft, ArrowRight, Check, LoaderCircle, Sparkles, X } from 'lucide-react'
+import { useState } from 'react'
+
+const genreOptions = ['悬疑推理', '玄幻升级', '都市现实', '言情情感', '科幻脑洞', '历史权谋']
+const lengthOptions = [{ id: 'short', label: '短篇', hint: '一个核心事件，8 章以内', count: 8 }, { id: 'medium', label: '中篇', hint: '完整人物弧光，约 40 章', count: 40 }, { id: 'long', label: '长篇', hint: '分卷推进，约 120 章起', count: 120 }]
+
+function QuickCreateFlow({ initialIdea, onClose, onClarify, onGenerate, onCreate }) {
+  const [idea, setIdea] = useState(initialIdea)
+  const [genre, setGenre] = useState('悬疑推理')
+  const [length, setLength] = useState('medium')
+  const [stage, setStage] = useState('form')
+  const [questions, setQuestions] = useState([])
+  const [answers, setAnswers] = useState({})
+  const [blueprint, setBlueprint] = useState(null)
+  const [blueprintMode, setBlueprintMode] = useState('model')
+  const [blueprintNotice, setBlueprintNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const settings = () => { const selectedLength = lengthOptions.find((option) => option.id === length); return { title: '', premise: idea.trim(), genre, direction: '不限', tags: [genre], chapterCount: selectedLength.count, wordsPerChapter: length === 'short' ? 2000 : length === 'medium' ? 2500 : 3000, lengthMode: length, lengthModeSource: 'manual', pov: '第三人称', updateRhythm: '日更', ending: length === 'short' ? '反转型' : '成长型' } }
+  async function begin() { if (idea.trim().length < 6) { setError('先写下一句故事想法，至少 6 个字即可。'); return } setBusy(true); setError(''); try { const result = await onClarify(settings()); const nextQuestions = Array.isArray(result.questions) ? result.questions.slice(0, 3) : []; if (nextQuestions.length < 3) throw new Error('AI 追问暂时不可用，请重试'); setQuestions(nextQuestions); setAnswers(Object.fromEntries(nextQuestions.map((question) => [question.id, '']))); setStage('questions') } catch (requestError) { setError(requestError.message || 'AI 追问暂时不可用，请重试') } finally { setBusy(false) } }
+  async function makeBlueprint() { setBusy(true); setError(''); setBlueprintNotice(''); try { const clarifications = questions.map((question) => `${question.label}：${answers[question.id] || '由创作总编综合判断'}`); const result = await onGenerate({ ...settings(), clarifications }); if (!result.blueprint?.options?.length) throw new Error('故事方案生成失败，请重试'); setBlueprint(result.blueprint); setBlueprintMode(result.mode || 'model'); setBlueprintNotice(result.notice || ''); setStage('blueprint') } catch (requestError) { setError(requestError.message || '故事方案生成失败，请重试') } finally { setBusy(false) } }
+
+  return <div className="nf-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><section className="nf-quick-create" role="dialog" aria-modal="true" aria-labelledby="nf-create-title"><header><div><span><Sparkles size={17} />快速创作</span><h2 id="nf-create-title">把一个念头，变成一部作品</h2><p>确认前不会创建或覆盖任何作品。</p></div><button type="button" onClick={onClose} disabled={busy} title="关闭快速创作"><X size={19} /></button></header>
+    {stage === 'form' && <div className="nf-create-body"><h3>你想写一个怎样的故事？</h3><p>不用会写大纲。先把脑海里的画面、人物或冲突说出来。</p><label>故事想法<textarea autoFocus value={idea} onChange={(event) => setIdea(event.target.value)} placeholder="例如：一个只能看见别人记忆最后十秒的女孩，为救失踪的哥哥，必须进入每个嫌疑人的记忆……" /></label><fieldset><legend>题材</legend><div className="nf-choice-list">{genreOptions.map((item) => <button type="button" key={item} className={genre === item ? 'is-selected' : ''} onClick={() => setGenre(item)}>{item}{genre === item && <Check size={14} />}</button>)}</div></fieldset><fieldset><legend>篇幅</legend><div className="nf-length-list">{lengthOptions.map((item) => <button type="button" key={item.id} className={length === item.id ? 'is-selected' : ''} onClick={() => setLength(item.id)}><strong>{item.label}</strong><span>{item.hint}</span>{length === item.id && <Check size={16} />}</button>)}</div></fieldset></div>}
+    {stage === 'questions' && <div className="nf-create-body"><h3>再补几条关键信息</h3><p>选择接近的选项，或直接写下你的想法。它们会影响故事方向。</p>{questions.map((question) => <section className="nf-question" key={question.id}><strong>{question.label}</strong><div className="nf-choice-list">{question.options?.map((option) => <button type="button" key={option} className={answers[question.id] === option ? 'is-selected' : ''} onClick={() => setAnswers((value) => ({ ...value, [question.id]: option }))}>{option}{answers[question.id] === option && <Check size={14} />}</button>)}</div><input value={answers[question.id] || ''} onChange={(event) => setAnswers((value) => ({ ...value, [question.id]: event.target.value }))} placeholder={question.placeholder || '也可以直接写下你的想法'} /></section>)}</div>}
+    {stage === 'blueprint' && <div className="nf-create-body nf-blueprint-list"><h3>选择一个故事方向</h3><p>阿流整理了三个可继续深化的起点。</p><div className={`nf-generation-status ${blueprintMode === 'model' ? 'is-model' : 'is-fallback'}`}><Sparkles size={14} /><span>{blueprintMode === 'model' ? '已由当前 API 模型生成' : '当前为本地备用方案'}</span>{blueprintNotice && <small>{blueprintNotice}</small>}</div>{blueprint.options.map((option) => <article key={option.title}><span>{option.creativeDirection || '故事方向'}</span><h4>{option.title}</h4><p>{option.synopsis}</p><strong>核心冲突：{option.coreConflict}</strong><button type="button" className="nf-primary-button" disabled={busy} onClick={async () => { setBusy(true); setError(''); try { await onCreate({ ...settings(), clarifications: questions.map((question) => `${question.label}：${answers[question.id] || ''}`) }, option) } catch (requestError) { setError(requestError.message || '创建作品失败，请重试') } finally { setBusy(false) } }}>选择这个方向<ArrowRight size={15} /></button></article>)}</div>}
+    {error && <p className="nf-create-error" role="alert">{error}</p>}<footer>{busy ? <span><LoaderCircle size={15} />阿流正在整理创作内容…</span> : stage === 'form' ? <><span>第 1 步 · 输入故事想法</span><button type="button" className="nf-primary-button" onClick={begin}>继续，让阿流追问<ArrowRight size={15} /></button></> : stage === 'questions' ? <><button type="button" className="nf-secondary-button" onClick={() => setStage('form')}><ArrowLeft size={15} />返回修改</button><button type="button" className="nf-primary-button" onClick={makeBlueprint}>生成 3 个方向<Sparkles size={15} /></button></> : <button type="button" className="nf-secondary-button" onClick={() => setStage('questions')}><ArrowLeft size={15} />返回修改</button>}</footer>
+  </section></div>
+}
+
+export default QuickCreateFlow
