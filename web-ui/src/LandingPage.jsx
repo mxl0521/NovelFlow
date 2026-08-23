@@ -1,5 +1,6 @@
 import { Feather } from 'lucide-react'
 import { useState } from 'react'
+import heroFeather from './assets/1.png'
 import './LandingPage.css'
 
 function LandingPage({ onStart }) {
@@ -9,10 +10,12 @@ function LandingPage({ onStart }) {
     <main className="landing-page">
       <div className="landing-grain" aria-hidden="true" />
       <header className="landing-brand"><Feather size={23} strokeWidth={1.65} aria-hidden="true" /><strong>NovelFlow</strong></header>
-      <div className="landing-quill" aria-hidden="true"><Feather /></div>
-      <section className="landing-copy">
-        <h1>每一个想法，<br />都是一段未写完的故事。</h1>
-        <p className="landing-subtitle">把灵感写下来，让它慢慢长成一个完整的世界。</p>
+      <section className="hero-composition" aria-labelledby="landing-hero-title">
+        <div className="hero-copy">
+          <h1 id="landing-hero-title"><span className="hero-title-line hero-title-line--1"><span className="hero-title-line-inner">每一个想法，</span></span><span className="hero-title-line hero-title-line--2"><span className="hero-title-line-inner">都是一段未写完的故事。</span></span></h1>
+          <p className="landing-subtitle">把灵感写下来，让它慢慢长成一个完整的世界。</p>
+        </div>
+        <div className="hero-quill-wrap"><img className="landing-hero-quill" src={heroFeather} alt="" aria-hidden="true" /></div>
       </section>
       <section className="landing-paper" aria-labelledby="landing-title">
         <Feather className="landing-paper-mark" size={22} strokeWidth={1.35} aria-hidden="true" />
