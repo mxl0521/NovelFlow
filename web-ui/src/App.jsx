@@ -63,7 +63,7 @@ function App() {
   const renderWorkspaceView = () => {
     if (screen === 'home') return <HomePage project={project} projects={visibleProjects} loading={loading} error={loadError} onRetry={refreshProjects} onCreate={(idea = '') => { setInitialIdea(idea); setCreateOpen(true) }} onOpenProject={handleProjectSelect} onOpenWritingRoom={() => setScreen('writing')} onProjectsChanged={refreshProjects} />
     if (screen === 'stories') return <HomePage project={project} projects={visibleProjects} loading={loading} error={loadError} onRetry={refreshProjects} onCreate={(idea = '') => { setInitialIdea(idea); setCreateOpen(true) }} onOpenProject={handleProjectSelect} onOpenWritingRoom={() => setScreen('writing')} onProjectsChanged={refreshProjects} />
-    if (screen === 'project') return <ProjectOverviewPage project={project} onBack={() => setScreen('home')} onOpenWritingRoom={() => setScreen('writing')} />
+    if (screen === 'project') return <ProjectOverviewPage project={project} onBack={() => setScreen('home')} onOpenWritingRoom={() => setScreen('writing')} onProjectRefresh={setProject} />
     if (screen === 'settings') return <SettingsPage />
     return <WorkspaceView view={screen} project={project} projects={visibleProjects} onOpenCreator={() => setCreateOpen(true)} onOpenWritingRoom={() => setScreen('writing')} />
   }

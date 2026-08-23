@@ -7,7 +7,7 @@ const navigation = [
 
 function progressFor(project) {
   if (!project?.chapters?.length) return 0
-  return Math.round(project.chapters.filter((chapter) => chapter.status === '已定稿' || chapter.status === '已完成').length / project.chapters.length * 100)
+  return Math.round(project.chapters.filter((chapter) => String(chapter.body || '').trim()).length / project.chapters.length * 100)
 }
 
 function AppShell({ children, project, view = 'home', onNavigate, onOpenCreator, onOpenWritingRoom, onOpenAssistant, onOpenSearch, onOpenNotifications, onOpenProfile }) {

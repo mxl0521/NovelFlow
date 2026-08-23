@@ -247,7 +247,13 @@ WORKFLOW_STEPS = [(skill["id"], skill["label"]) for skill in CORE_AGENT_SKILLS]
 
 CHAPTER_TYPES = {"推进主线", "强化冲突", "人物关系", "反转揭密", "情绪爆点", "阶段收束"}
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+API_LOG_PATH = Path(__file__).with_name("novelflow-api.log")
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.FileHandler(API_LOG_PATH, encoding="utf-8"), logging.StreamHandler()],
+    )
 request_times: dict[str, deque[float]] = defaultdict(deque)
 model_usage: dict[tuple[str, str], int] = defaultdict(int)
 workflow_runs: dict[str, dict[str, Any]] = {}
@@ -524,11 +530,17 @@ def ensure_project_schema(project: dict[str, Any]) -> None:
 
 
 def project_metadata(project: dict[str, Any], active_id: str) -> dict[str, Any]:
+    chapters = _project_chapters(project)
+    settings = project.get("settings", {}) if isinstance(project.get("settings"), dict) else {}
+    planned_chapters = max(len(chapters), int(settings.get("chapterCount", 0) or 0))
+    written_chapters = sum(1 for chapter in chapters if str(chapter.get("body", "")).strip())
     return {
         "id": project.get("id", ""),
         "title": project.get("title", "未命名作品"),
         "genre": project.get("genre", "未分类"),
-        "chapterCount": project.get("settings", {}).get("chapterCount", len(project.get("chapters", []))),
+        "chapterCount": planned_chapters,
+        "writtenChapterCount": written_chapters,
+        "progress": round(written_chapters / planned_chapters * 100) if planned_chapters else 0,
         "updatedAt": project.get("updated_at"),
         "active": project.get("id") == active_id,
     }
@@ -550,14 +562,22 @@ except Exception as exc:
 
 
 MANAGED_PROFILES = load_managed_profiles()
-PROFILES = load_profiles() + MANAGED_PROFILES
-PROFILE_BY_ID = {profile["id"]: profile for profile in PROFILES}
+PROFILES: list[dict[str, Any]] = []
+PROFILE_BY_ID: dict[str, dict[str, Any]] = {}
 
 
 def refresh_profiles() -> None:
     global PROFILES, PROFILE_BY_ID
-    PROFILES = load_profiles() + MANAGED_PROFILES
+    profiles_by_id: dict[str, dict[str, Any]] = {}
+    for profile in load_profiles() + MANAGED_PROFILES:
+        profile_id = str(profile.get("id", "")).strip()
+        if profile_id:
+            profiles_by_id[profile_id] = profile
+    PROFILES = list(profiles_by_id.values())
     PROFILE_BY_ID = {profile["id"]: profile for profile in PROFILES}
+
+
+refresh_profiles()
 
 
 def limited_list(value: Any, count: int, text_limit: int) -> list[Any]:
@@ -895,18 +915,20 @@ def assistant_thread_history(chapter_id: str, limit: int = 12) -> list[dict[str,
         if not content:
             continue
         record: dict[str, Any] = {"role": item["role"], "content": content[:MAX_MESSAGE_CHARS]}
-        for key in ("createdAt", "chapterId", "instruction"):
+        for key in ("createdAt", "chapterId", "instruction", "operation"):
             if item.get(key):
                 record[key] = str(item[key])[:MAX_MESSAGE_CHARS]
+        for key in ("error", "status", "action"):
+            if item.get(key):
+                record[key] = item[key]
         if isinstance(item.get("evidence"), list):
             record["evidence"] = [entry for entry in item["evidence"][:4] if isinstance(entry, dict)]
         clean.append(record)
     return clean
 
 
-def persist_assistant_exchange(chapter_id: str, user_message: str, assistant_reply: str, evidence: list[dict[str, Any]]) -> None:
-    """Persist a completed assistant exchange without allowing unbounded project growth."""
-    now = datetime.now(timezone.utc).isoformat()
+def persist_assistant_records(chapter_id: str, records: list[dict[str, Any]]) -> None:
+    """Persist bounded, chapter-scoped assistant events for a reload-safe history."""
     with project_lock:
         memory = PROJECT.setdefault("memory", {})
         threads = memory.setdefault("assistant_threads", {})
@@ -917,12 +939,39 @@ def persist_assistant_exchange(chapter_id: str, user_message: str, assistant_rep
         if not isinstance(thread, list):
             thread = []
             threads[chapter_id] = thread
-        thread.extend([
-            {"role": "user", "content": user_message[:MAX_MESSAGE_CHARS], "createdAt": now, "chapterId": chapter_id},
-            {"role": "assistant", "content": assistant_reply[:MAX_MESSAGE_CHARS], "evidence": evidence[:4], "instruction": user_message[:MAX_MESSAGE_CHARS], "createdAt": now, "chapterId": chapter_id},
-        ])
+        now = datetime.now(timezone.utc).isoformat()
+        for item in records:
+            if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+                continue
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            record = {"role": item["role"], "content": content[:MAX_MESSAGE_CHARS], "createdAt": now, "chapterId": chapter_id}
+            for key in ("instruction", "operation", "error", "status", "action"):
+                if item.get(key):
+                    record[key] = item[key]
+            if isinstance(item.get("evidence"), list):
+                record["evidence"] = item["evidence"][:4]
+            thread.append(record)
         threads[chapter_id] = thread[-ASSISTANT_HISTORY_LIMIT:]
         save_project(PROJECT)
+
+
+def persist_assistant_exchange(chapter_id: str, user_message: str, assistant_reply: str, evidence: list[dict[str, Any]]) -> None:
+    """Persist a completed assistant exchange without allowing unbounded project growth."""
+    persist_assistant_records(chapter_id, [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": assistant_reply, "evidence": evidence, "instruction": user_message},
+    ])
+
+
+def persist_chapter_generation_event(chapter_id: str, operation: str, instruction: str, result: str, *, error: bool = False) -> None:
+    operation_label = {"continue": "生成本章正文", "rewrite": "重写当前章节", "condense": "精简当前章节", "conflict": "加强本章冲突"}.get(operation, "处理当前章节")
+    request = instruction.strip() or operation_label
+    persist_assistant_records(chapter_id, [
+        {"role": "user", "content": request, "operation": operation},
+        {"role": "assistant", "content": result, "instruction": request, "operation": operation, "status": True, "error": error},
+    ])
 
 
 def build_workflow_context(chapter_id: str, draft: str) -> dict[str, Any]:
@@ -1058,6 +1107,41 @@ def normalize_memory_patch(raw: dict[str, Any]) -> dict[str, Any]:
         "timeline": records(raw.get("timeline"), ("id", "chapterId", "time", "location", "event", "participants"), 30),
         "storyArcs": records(raw.get("storyArcs"), ("id", "title", "status", "goal", "progress", "nextBeat"), 20),
         "entities": {key: records(entities_raw.get(key), ("id", "name", "summary", "rules", "firstChapter", "lastChapter"), 20) for key in ("locations", "items", "organizations", "abilities")},
+    }
+
+
+def normalize_story_dossier(raw: Any) -> dict[str, Any]:
+    """Bound model-derived dossier records before persisting them as story facts."""
+    if not isinstance(raw, dict):
+        raise ValueError("story_dossier")
+
+    def text(value: Any, limit: int = 800) -> str:
+        return str(value or "").strip()[:limit]
+
+    def records(value: Any, fields: tuple[str, ...], limit: int = 20) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, str]] = []
+        for item in value[:limit]:
+            if not isinstance(item, dict):
+                continue
+            record = {field: text(item.get(field), 800 if field in {"content", "summary", "note", "state", "relationship"} else 180) for field in fields}
+            if any(record.values()):
+                result.append(record)
+        return result
+
+    characters = records(raw.get("characters"), ("name", "role", "state", "relationship", "lastChapter"), 24)
+    characters = [item for item in characters if item.get("name") and not re.fullmatch(r"(?:主角|关键对手|关键人物\d+)", item["name"])]
+    foreshadows = records(raw.get("foreshadows"), ("name", "status", "plantedChapter", "lastChapter", "note"), 30)
+    world_facts = records(raw.get("worldFacts"), ("title", "content", "sourceChapters", "status"), 24)
+    return {
+        "synopsis": text(raw.get("synopsis"), 2_000),
+        "currentState": text(raw.get("currentState"), 1_000),
+        "storyPhase": text(raw.get("storyPhase"), 300),
+        "worldFacts": world_facts,
+        "characters": characters,
+        "foreshadows": foreshadows,
+        "updatedThroughChapter": text(raw.get("updatedThroughChapter"), 40),
     }
 
 
@@ -1843,6 +1927,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if self.path == "/api/project/chapters/memory-preview":
             self._preview_chapter_memory()
             return
+        if self.path == "/api/project/dossier/refresh":
+            self._refresh_story_dossier()
+            return
         if self.path == "/api/project/chapters/finalize":
             self._save_chapter(finalize=True)
             return
@@ -2098,6 +2185,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         steps_to_run = selected_workflow_steps(payload.get("agentIds"))
         agent_meta = workflow_agent_metadata(payload.get("agentIds"), steps_to_run)
         resume_task_id = str(payload.get("resumeTaskId", "")).strip()
+        requested_run_id = str(payload.get("runId", "")).strip()
         if not re.fullmatch(r"\d{2,}", chapter_id):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "章节编号不正确"})
             return
@@ -2127,7 +2215,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             task = dict(saved_task)
             task.update({"status": "running", "error": "", "steps": resumed_steps, "completedAgentIds": sorted(done_ids), "updatedAt": datetime.now(timezone.utc).isoformat()})
         else:
-            run_id = secrets.token_urlsafe(24)
+            run_id = requested_run_id if re.fullmatch(r"[A-Za-z0-9_-]{20,80}", requested_run_id) else secrets.token_urlsafe(24)
             task = {
                 "id": run_id,
                 "kind": "multi-agent",
@@ -2178,7 +2266,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             mode = "model"
             try:
+                current_agent_id = "start"
                 for step_id, label in steps_to_run:
+                    current_agent_id = step_id
                     with workflow_runs_lock:
                         cancelled = run_id in workflow_cancellations
                     if cancelled:
@@ -2239,14 +2329,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     task["updatedAt"] = datetime.now(timezone.utc).isoformat()
                     persist_workflow_task(task)
             except Exception as exc:
-                logging.error("workflow request failed at %s: %s", completed[-1]["id"] if completed else "start", type(exc).__name__)
-                task["error"] = "模型协作请求失败，请检查配置后重试"
+                failed_agent = current_agent_id if "current_agent_id" in locals() else (completed[-1]["id"] if completed else "start")
+                safe_error = provider_error_message(exc)
+                logging.error("workflow request failed at %s: %s", failed_agent, type(exc).__name__)
+                task["failedAgentId"] = failed_agent
+                task["error"] = f"{failed_agent}：{safe_error}"
                 task["steps"] = completed
                 task["completedAgentIds"] = [item["id"] for item in completed]
                 task["status"] = "failed"
                 task["updatedAt"] = datetime.now(timezone.utc).isoformat()
                 persist_workflow_task(task)
-                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型协作请求失败，请检查配置后重试", "runId": run_id})
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": task["error"], "failedAgentId": failed_agent, "runId": run_id})
                 return
 
         writer = next((item for item in completed if item["id"] == "writer"), completed[-1])
@@ -2296,6 +2389,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             task["updatedAt"] = datetime.now(timezone.utc).isoformat()
             persist_workflow_task(task)
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型返回的正文过短，已阻止写入；请重试当前章节"})
+            return
+        with workflow_runs_lock:
+            cancelled = run_id in workflow_cancellations
+        if cancelled:
+            task["status"] = "cancelled"
+            task["error"] = "任务已由用户取消"
+            task["steps"] = completed
+            task["completedAgentIds"] = [item["id"] for item in completed]
+            task["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            persist_workflow_task(task)
             return
         memory = json.loads(json.dumps(PROJECT.get("memory", {}), ensure_ascii=False))
         review = next((item for item in completed if item["id"] == "review"), completed[-1])
@@ -2693,8 +2796,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         if consume_model_quota(self.client_address[0], profile["id"]):
             self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "今日模型调用额度已用完，请明日再试或调整本机额度"})
             return
+        settings = PROJECT.get("settings", {}) if isinstance(PROJECT.get("settings"), dict) else {}
+        try:
+            chapter_target = max(500, min(10_000, int(settings.get("wordsPerChapter", 2_000))))
+        except (TypeError, ValueError):
+            chapter_target = 2_000
+        current_words = len(re.sub(r"\s", "", full_draft))
+        remaining_words = max(500, chapter_target - current_words)
+        requested_words = chapter_target if operation == "continue" and current_words < 500 else remaining_words
+        author_instruction = str(payload.get("instruction", "")).strip()[:2_000]
+        request_label = author_instruction or {"continue": "生成本章正文", "rewrite": "重写当前章节", "condense": "精简当前章节", "conflict": "加强本章冲突"}[operation]
+        author_note = f"\n作者本次特别要求：{author_instruction}" if author_instruction else ""
         instructions = {
-            "continue": "接着当前正文续写 500 到 700 字，推进本章目标并留下结尾钩子。",
+            "continue": (
+                f"生成当前章节的完整中文正文；本章目标约 {requested_words} 字"
+                f"（作品设定每章约 {chapter_target} 字），必须有具体场景、人物行动、"
+                f"对话、冲突推进和章末钩子。不要只给提纲或几百字片段。{author_note}"
+            ),
             "conflict": "续写一段加强外部冲突的正文，让人物主动选择并付出代价。",
             "rewrite": "在不改变关键事实的前提下，完整改写当前正文，使人物动机、语气和关系严格符合人物卡。输出完整改写后的正文。",
             "condense": "将当前正文压缩为约 60% 的篇幅，保留人物动机、关键线索和结尾钩子，输出完整压缩后的正文。",
@@ -2702,38 +2820,73 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             chunks = split_text_chunks(target_text) if operation in {"rewrite", "condense"} else [target_text[-6_000:]]
             outputs = []
-            for index, chunk in enumerate(chunks, start=1):
-                chunk_note = f"这是全文的第 {index}/{len(chunks)} 段，保持与相邻段落衔接。" if len(chunks) > 1 else ""
+            generation_passes = len(chunks) if operation in {"rewrite", "condense"} else 4
+            completed_passes = 0
+            for index in range(generation_passes):
+                if operation == "continue":
+                    generated_so_far = len(re.sub(r"\s", "", "\n\n".join(outputs)))
+                    if generated_so_far >= requested_words:
+                        break
+                    chunk = "\n\n".join(outputs)[-6_000:] if outputs else target_text[-6_000:]
+                    remaining_words = max(500, requested_words - generated_so_far)
+                    chunk_note = (
+                        f"这是本章生成的第 {index + 1} 段。前面已经生成约 {generated_so_far} 字，"
+                        f"请继续写约 {remaining_words} 字，必须承接上一段，不要重复，不要总结，不要提前结束。"
+                    )
+                else:
+                    chunk = chunks[index]
+                    chunk_note = f"这是全文的第 {index + 1}/{len(chunks)} 段，保持与相邻段落衔接。" if len(chunks) > 1 else ""
+                task_instruction = instructions[operation]
+                if operation == "continue" and index > 0:
+                    task_instruction = f"继续完成当前章节的中文正文，补写约 {remaining_words} 字，承接已有内容并推进冲突，结尾留下有效钩子。不要重复已有段落，不要提纲，不要解释。"
                 prompt_context = compact_workflow_context(context, "writer")
                 if "aiport.systems" in str(profile.get("base_url", "")).lower():
                     prompt = "You are a Chinese fiction writer. Output only polished Chinese prose, no headings, explanations, Markdown, or JSON."
-                    task_prompt = f"Story context: {json.dumps(prompt_context, ensure_ascii=False)}\nDraft: {chunk}\nTask: {instructions[operation]}\n{chunk_note}"
+                    task_prompt = f"Story context: {json.dumps(prompt_context, ensure_ascii=False)}\nDraft: {chunk}\nTask: {task_instruction}\n{chunk_note}"
                 else:
                     prompt = "你是 NovelFlow 的章节写手。只输出可以直接粘贴进小说的中文正文，不要标题、解释或 Markdown。"
-                    task_prompt = f"作品上下文：{json.dumps(prompt_context, ensure_ascii=False)}\n待处理正文：{chunk}\n{chunk_note}\n任务：{instructions[operation]}"
+                    task_prompt = f"作品上下文：{json.dumps(prompt_context, ensure_ascii=False)}\n待处理正文：{chunk}\n{chunk_note}\n任务：{task_instruction}"
                 outputs.append(invoke_model(
                     profile,
                     prompt,
                     task_prompt,
-                    max_tokens=2_200 if operation in {"rewrite", "condense"} else 1_300,
+                    max_tokens=(max(2_200, min(8_000, max(remaining_words, requested_words) * 2)) if operation == "continue" else 2_200),
                 ).strip())
+                completed_passes = index + 1
             content = "\n\n".join(item for item in outputs if item)
-            self._send_json(HTTPStatus.OK, {"mode": "model", "content": content, "replace": operation in {"condense", "rewrite"}, "range": {"start": start, "end": end} if has_selection else None})
+            minimum_words = max(500, min(requested_words, int(chapter_target * 0.6))) if operation == "continue" else 0
+            generated_words = len(re.sub(r"\s", "", content))
+            if operation == "continue" and generated_words < minimum_words:
+                message = f"模型只完成了 {generated_words} 字，低于本章最低要求 {minimum_words} 字，未写入编辑器。"
+                persist_chapter_generation_event(chapter_id, operation, request_label, message, error=True)
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": message})
+                return
+            message = f"{request_label}完成：共生成 {generated_words} 字，已放入编辑器草稿，点击保存后写入作品。"
+            persist_chapter_generation_event(chapter_id, operation, request_label, message)
+            self._send_json(HTTPStatus.OK, {"mode": "model", "content": content, "targetWords": requested_words, "generatedWords": generated_words, "replace": operation in {"condense", "rewrite"}, "range": {"start": start, "end": end} if has_selection else None})
         except ValueError as exc:
             if str(exc) == "chapter_too_large_for_rewrite":
                 self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "本章过长，请先在编辑器中选中需要改写或压缩的段落"})
                 return
             logging.error("chapter operation validation failed: %s", str(exc))
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "章节生成结果不完整，请重试"})
+            message = "章节生成结果不完整，请重试。"
+            persist_chapter_generation_event(chapter_id, operation, request_label, message, error=True)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": message})
         except Exception as exc:
-            logging.error("chapter operation failed: %s", type(exc).__name__)
-            fallback = {
-                "continue": "门外的雾忽然向后退了一步，露出站台尽头一块刚被擦亮的站牌。沈砚没有追过去，而是把车票压在灯下。票面上的日期正在改变，下一行字缓慢浮现：二号档案柜。",
-                "conflict": "门外的声音再次响起，要求沈砚立刻交出票据。他握紧手里的钥匙，意识到沉默本身已经成为对方最害怕的回答。",
-                "rewrite": target_text or "沈砚望着雾中的站台，终于迈出了第一步。",
-                "condense": (target_text or "沈砚望着雾中的站台，终于迈出了第一步。")[:max(120, len(target_text) * 3 // 5)],
-            }[operation]
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时没有返回章节内容，请重试"})
+            partial_outputs = outputs if "outputs" in locals() else []
+            content = "\n\n".join(item for item in partial_outputs if item)
+            generated_words = len(re.sub(r"\s", "", content))
+            minimum_words = max(500, min(requested_words, int(chapter_target * 0.6))) if operation == "continue" else 0
+            safe_error = provider_error_message(exc)
+            logging.error("chapter operation failed: chapter=%s operation=%s pass=%s completed=%s words=%s error=%s", chapter_id, operation, (index + 1) if "index" in locals() else 1, completed_passes if "completed_passes" in locals() else 0, generated_words, safe_error)
+            if operation == "continue" and generated_words >= minimum_words:
+                message = f"上游模型在后续补写时中断，但前 {completed_passes} 段已生成 {generated_words} 字，内容已保留到编辑器草稿。"
+                persist_chapter_generation_event(chapter_id, operation, request_label, message)
+                self._send_json(HTTPStatus.OK, {"mode": "model", "content": content, "targetWords": requested_words, "generatedWords": generated_words, "notice": message, "partial": True, "replace": False, "range": None})
+                return
+            message = f"第 {(index + 1) if 'index' in locals() else 1} 段生成失败：{safe_error}"
+            persist_chapter_generation_event(chapter_id, operation, request_label, message, error=True)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": message})
 
     def _bootstrap_project(self) -> None:
         if rate_limited(self.client_address[0]):
@@ -3065,6 +3218,73 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logging.warning("memory preview failed: %s", type(exc).__name__)
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时无法整理长期记忆，请重试"})
+
+    def _refresh_story_dossier(self) -> None:
+        global PROJECT
+        if rate_limited(self.client_address[0]):
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "请求过于频繁，请稍后再试"})
+            return
+        payload = self._read_payload()
+        if payload is None:
+            return
+        profile_id = str(payload.get("profileId", "")).strip()
+        profile = PROFILE_BY_ID.get(profile_id)
+        if profile is None or not profile_api_key(profile):
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "当前模型尚未配置密钥，请先在设置中配置模型"})
+            return
+        chapters = _project_chapters(PROJECT)
+        if not chapters:
+            self._send_json(HTTPStatus.CONFLICT, {"error": "当前作品还没有章节，暂时无法整理资料"})
+            return
+        memory = PROJECT.get("memory", {}) if isinstance(PROJECT.get("memory"), dict) else {}
+        summaries = memory.get("chapter_summaries", {}) if isinstance(memory.get("chapter_summaries"), dict) else {}
+        source_chapters = []
+        for chapter in chapters[-20:]:
+            body = str(chapter.get("body", ""))
+            excerpt = body[:1_600]
+            if len(body) > 3_400:
+                excerpt += "\n……\n" + body[-1_600:]
+            source_chapters.append({
+                "id": str(chapter.get("id", "")),
+                "title": str(chapter.get("title", "")),
+                "summary": str(summaries.get(str(chapter.get("id", "")), ""))[:1_000],
+                "bodyExcerpt": excerpt,
+            })
+        prompt = (
+            "你是小说资料整理员。只输出合法 JSON，不要 Markdown，不要创造正文没有出现的人物或事实。"
+            "请根据已保存章节整理当前作品资料。初始设定只能作为背景参考，章节正文优先。"
+            "人物必须使用正文中出现的真实姓名，禁止返回‘主角’、‘关键对手’、‘关键人物1’等占位词。"
+            "伏笔状态只能使用：埋设、推进中、部分回收、已回收、待确认。"
+            "格式：{\"synopsis\":\"\",\"currentState\":\"\",\"storyPhase\":\"\","
+            "\"updatedThroughChapter\":\"\",\"worldFacts\":[{\"title\":\"\",\"content\":\"\",\"sourceChapters\":\"\",\"status\":\"已确认\"}],"
+            "\"characters\":[{\"name\":\"\",\"role\":\"\",\"state\":\"\",\"relationship\":\"\",\"lastChapter\":\"\"}],"
+            "\"foreshadows\":[{\"name\":\"\",\"status\":\"\",\"plantedChapter\":\"\",\"lastChapter\":\"\",\"note\":\"\"}]}。"
+            "最多整理 8 条世界事实、12 个人物、16 条伏笔。"
+        )
+        kit = memory.get("project_kit", {}) if isinstance(memory.get("project_kit"), dict) else {}
+        source = {
+            "project": {"title": PROJECT.get("title", ""), "genre": PROJECT.get("genre", ""), "initialSynopsis": str(kit.get("synopsis", ""))[:2_000], "initialRules": kit.get("worldRules", [])[:8] if isinstance(kit.get("worldRules"), list) else []},
+            "chapters": source_chapters,
+        }
+        try:
+            raw = extract_json_object(invoke_model(profile, prompt, json.dumps(source, ensure_ascii=False), max_tokens=3_500))
+            dossier = normalize_story_dossier(raw)
+            dossier["updatedThroughChapter"] = str(chapters[-1].get("id", ""))
+        except Exception as exc:
+            logging.warning("story dossier refresh failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时无法整理作品资料，请稍后重试"})
+            return
+        with project_lock:
+            memory = PROJECT.setdefault("memory", {})
+            memory["story_dossier"] = dossier
+            memory["story_dossier_meta"] = {"source": "saved_chapters", "updatedAt": datetime.now(timezone.utc).isoformat(), "updatedThroughChapter": dossier.get("updatedThroughChapter", "")}
+            try:
+                save_project(PROJECT)
+            except Exception as exc:
+                logging.error("story dossier save failed: %s", type(exc).__name__)
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "作品资料保存失败"})
+                return
+        self._send_json(HTTPStatus.OK, {"ok": True, "dossier": dossier, "memory": PROJECT.get("memory", {})})
 
     def _create_chapter(self) -> None:
         global PROJECT
