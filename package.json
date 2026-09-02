@@ -1,0 +1,10 @@
+{
+  "name": "novelflow",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "heroku-postbuild": "npm --prefix web-ui ci --omit=optional && npm --prefix web-ui run build"
+  }
+}

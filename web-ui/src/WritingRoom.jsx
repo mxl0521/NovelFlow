@@ -32,6 +32,10 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
   const editorRef = useRef(null)
   const chatEndRef = useRef(null)
   const activeRequestRef = useRef(null)
+  // Async saves can finish after another state update. Keep a canonical
+  // snapshot so a late dossier/title response cannot restore stale chapters.
+  const projectRef = useRef(project)
+  projectRef.current = project
 
   useEffect(() => {
     activeRequestRef.current?.abort()
@@ -65,11 +69,52 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
     setSelection({ start: element.selectionStart, end: element.selectionEnd, text: draft.slice(element.selectionStart, element.selectionEnd) })
   }
   function updateActiveChapter(nextChapter) {
-    onProjectRefresh({ ...project, chapters: chapters.map((chapter) => chapter.id === nextChapter.id ? nextChapter : chapter) })
+    const currentProject = projectRef.current || project
+    const currentChapters = Array.isArray(currentProject?.chapters) ? currentProject.chapters : []
+    const definedFields = Object.fromEntries(Object.entries(nextChapter).filter(([, value]) => value !== undefined))
+    const nextProject = { ...currentProject, chapters: currentChapters.map((chapter) => chapter.id === nextChapter.id ? { ...chapter, ...definedFields } : chapter) }
+    projectRef.current = nextProject
+    onProjectRefresh(nextProject)
+  }
+  async function persistDraft(chapter, body) {
+    const response = await saveChapter({ ...chapter, body })
+    const currentProject = projectRef.current || project
+    const currentChapters = Array.isArray(currentProject?.chapters) ? currentProject.chapters : []
+    const nextProject = {
+      ...currentProject,
+      chapters: currentChapters.map((item) => item.id === response.chapter.id ? { ...item, ...response.chapter } : item),
+      memory: response.memory || currentProject.memory,
+    }
+    projectRef.current = nextProject
+    onProjectRefresh(nextProject)
+    return response
+  }
+  async function selectChapter(nextId) {
+    if (!nextId || nextId === activeChapter?.id) return
+    if (busy) {
+      setNotice('当前 AI 操作还在进行，请等待完成或点击“停止”后再切换章节。')
+      return
+    }
+    const savedBody = String(activeChapter?.body || '')
+    if (activeChapter && draft !== savedBody) {
+      setBusy('save')
+      try {
+        await persistDraft(activeChapter, draft)
+      } catch (error) {
+        setNotice(`当前章节尚未保存，暂时不能切换：${error.message || '保存失败，请重试'}`)
+        return
+      } finally {
+        setBusy('')
+      }
+    }
+    // Re-read after the save so returning to a chapter always uses the
+    // server's authoritative body, including AI-generated text.
+    await refreshProject(nextId)
   }
   async function refreshProject(nextActiveId = activeId) {
     const response = await fetchProject()
-    const nextProject = response.project || project
+    const nextProject = response.project || projectRef.current || project
+    projectRef.current = nextProject
     onProjectRefresh(nextProject)
     setActiveId(nextActiveId || nextProject.chapters?.[0]?.id || '')
   }
@@ -124,11 +169,20 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
     setBusy('save'); setNotice('')
     try {
       const response = await saveChapter({ ...activeChapter, body: draft })
-      const nextProject = { ...project, chapters: chapters.map((chapter) => chapter.id === response.chapter.id ? response.chapter : chapter) }
+      const currentProject = projectRef.current || project
+      const currentChapters = Array.isArray(currentProject?.chapters) ? currentProject.chapters : []
+      const nextProject = { ...currentProject, chapters: currentChapters.map((chapter) => chapter.id === response.chapter.id ? { ...chapter, ...response.chapter } : chapter), memory: response.memory || currentProject.memory }
+      projectRef.current = nextProject
       onProjectRefresh(nextProject)
       setNotice('正文已保存，资料同步中…')
       refreshStoryDossier(response.chapter.id)
-        .then((dossierResponse) => { onProjectRefresh({ ...nextProject, memory: dossierResponse.memory || { ...project.memory, story_dossier: dossierResponse.dossier } }); setNotice(`正文已保存，资料已同步至第 ${dossierResponse.dossier?.updatedThroughChapter || response.chapter.id} 章。`) })
+        .then((dossierResponse) => {
+          const latestProject = projectRef.current || nextProject
+          const dossierProject = { ...latestProject, memory: dossierResponse.memory || { ...latestProject.memory, story_dossier: dossierResponse.dossier } }
+          projectRef.current = dossierProject
+          onProjectRefresh(dossierProject)
+          setNotice(`正文已保存，资料已同步至第 ${dossierResponse.dossier?.updatedThroughChapter || response.chapter.id} 章。`)
+        })
         .catch((syncError) => { setNotice(`正文已保存；资料暂未同步：${syncError.message || '请稍后从作品资料页重试'}`) })
     } catch (error) { setNotice(error.message || '保存失败，请重试') } finally { setBusy('') }
   }
@@ -188,10 +242,17 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
         setSelection(null)
         setNotice('AI 已生成预览，确认后才会写入正文。')
       } else {
-        setDraft(`${draft}${draft ? '\n\n' : ''}${response.content}`)
+        const nextDraft = `${draft}${draft ? '\n\n' : ''}${response.content}`
+        setDraft(nextDraft)
         const titleUpdated = await syncChapterTitleFromText(response.content)
-        setNotice(response.notice || (titleUpdated ? 'AI 内容与章节名称已更新到编辑器草稿，尚未保存正文。' : 'AI 内容已插入正文草稿，尚未保存。'))
-        setMessages((current) => [...current, { role: 'assistant', content: `本次已生成 ${Number(response.generatedWords || 0).toLocaleString('zh-CN')} 字，已放入中间编辑器草稿。阿流上方的长文本是历史消息；请点击“查看编辑器”确认内容，再点击顶部“保存”。`, status: true, action: 'show-editor' }])
+        try {
+          await persistDraft({ ...activeChapter, title: titleUpdated || activeChapter.title }, nextDraft)
+          setNotice(response.notice || (titleUpdated ? 'AI 正文已写入第当前章节，并自动保存。' : 'AI 正文已写入当前章节，并自动保存。'))
+          setMessages((current) => [...current, { role: 'assistant', content: `已完成本章正文，共生成 ${Number(response.generatedWords || 0).toLocaleString('zh-CN')} 字，已自动保存。`, status: true, action: 'show-editor' }])
+        } catch (error) {
+          setNotice(`正文已生成到编辑器草稿，但自动保存失败：${error.message || '请点击保存后再切换章节'}`)
+          setMessages((current) => [...current, { role: 'assistant', content: '正文已生成到编辑器草稿，但还没有保存到作品。请先点击顶部“保存”，再切换章节。', error: true, status: true, action: 'show-editor' }])
+        }
       }
       return response
     } catch (error) {
@@ -214,23 +275,34 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
   }
   async function syncChapterTitleFromText(content) {
     const nextTitle = chapterTitleFromText(content)
-    if (!nextTitle || !activeChapter || nextTitle === activeChapter.title) return false
+    if (!nextTitle || !activeChapter || nextTitle === activeChapter.title) return ''
     try {
       const response = await renameChapter(activeChapter.id, nextTitle)
-      updateActiveChapter(response.chapter)
-      return true
+      // Rename responses contain the old body. Merge only the title into the
+      // latest local chapter so title sync can never erase generated prose.
+      updateActiveChapter({ ...response.chapter, body: undefined })
+      return nextTitle
     } catch (error) {
       setNotice(`正文已写入编辑器草稿，但章节名称未同步：${error.message || '请稍后重试'}`)
-      return false
+      return ''
     }
   }
   async function insertAssistantText(item) {
     if (!item || item.role !== 'assistant' || item.error || item.status || !String(item.content || '').trim()) return
     const prose = proseWithoutChapterTitle(item.content)
     if (!prose) { setNotice('这条回复只有章节标题，没有可写入的正文。'); return }
-    setDraft((current) => `${current}${current ? '\n\n' : ''}${prose}`)
-    const titleUpdated = await syncChapterTitleFromText(item.content)
-    setNotice(titleUpdated ? '已写入编辑器草稿，并同步章节名称；点击“保存”后才会同步正文。' : '已写入编辑器草稿，点击“保存”后才会同步到作品。')
+    const nextDraft = `${draft}${draft ? '\n\n' : ''}${prose}`
+    setDraft(nextDraft)
+    setBusy('save')
+    try {
+      const titleUpdated = await syncChapterTitleFromText(item.content)
+      await persistDraft({ ...activeChapter, title: titleUpdated || activeChapter.title }, nextDraft)
+      setNotice(titleUpdated ? '已写入正文并同步章节名称，内容已自动保存。' : '已写入正文，内容已自动保存。')
+    } catch (error) {
+      setNotice(`已写入编辑器草稿，但自动保存失败：${error.message || '请点击保存后再切换章节'}`)
+    } finally {
+      setBusy('')
+    }
   }
   function isDraftInsertPrompt(prompt) {
     return /写入正文|加入正文|放进正文|插入正文/.test(prompt) && !/不要|无需|不用|不能/.test(prompt)
@@ -312,7 +384,7 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
   return <div className="nf-writing-room">
     <header className="nf-writing-top"><button type="button" onClick={onBack} title="返回作品资料"><ArrowLeft size={17} /></button><div><span>{project?.title || '未命名作品'} / 正文写作</span><strong>{title}</strong></div><div className="nf-writing-top-actions"><span>{busy === 'save' ? '保存中…' : notice || '本地自动保存已启用'}</span>{busy && busy !== 'save' && <button type="button" className="nf-secondary-button nf-stop-button" onClick={stopActiveRequest}><Square size={13} />停止</button>}<button type="button" className="nf-secondary-button" onClick={() => setToolsOpen(true)}><Sparkles size={14} />创作工具</button><button type="button" className="nf-secondary-button" onClick={() => { setExportError(''); setExportOpen(true) }} disabled={Boolean(busy)}><Download size={14} />导出作品</button><button type="button" className="nf-secondary-button" onClick={save} disabled={Boolean(busy)}><Save size={14} />保存</button></div></header>
     <div className="nf-writing-grid">
-      <aside className="nf-chapter-rail"><div className="nf-rail-heading"><span>章节 <small>{chapters.length}</small></span><div><button type="button" title="新建章节" onClick={() => openChapterDialog('create')}><Plus size={15} /></button><button type="button" title="章节回收站" onClick={openTrash}><Trash2 size={14} /></button><button type="button" title="刷新章节" onClick={() => refreshProject()}><Sparkles size={14} /></button></div></div>{chapters.map((chapter) => <div className={`nf-chapter-row-wrap ${chapter.id === activeChapter?.id ? 'is-active' : ''}`} key={chapter.id}><button type="button" className="nf-chapter-row" onClick={() => setActiveId(chapter.id)}><span>第 {chapter.id} 章</span><strong>{chapter.title || '待命名章节'}</strong><small>{chapter.status || '待写'} · {chapterWords(chapter)} 字</small></button><button type="button" className="nf-chapter-menu-button" title={`编辑第 ${chapter.id} 章`} onClick={() => openChapterDialog('rename', chapter)}><Pencil size={13} /></button></div>)}</aside>
+      <aside className="nf-chapter-rail"><div className="nf-rail-heading"><span>章节 <small>{chapters.length}</small></span><div><button type="button" title="新建章节" onClick={() => openChapterDialog('create')}><Plus size={15} /></button><button type="button" title="章节回收站" onClick={openTrash}><Trash2 size={14} /></button><button type="button" title="刷新章节" onClick={() => refreshProject()}><Sparkles size={14} /></button></div></div>{chapters.map((chapter) => <div className={`nf-chapter-row-wrap ${chapter.id === activeChapter?.id ? 'is-active' : ''}`} key={chapter.id}><button type="button" className="nf-chapter-row" onClick={() => selectChapter(chapter.id)}><span>第 {chapter.id} 章</span><strong>{chapter.title || '待命名章节'}</strong><small>{chapter.status || '待写'} · {chapterWords(chapter)} 字</small></button><button type="button" className="nf-chapter-menu-button" title={`编辑第 ${chapter.id} 章`} onClick={() => openChapterDialog('rename', chapter)}><Pencil size={13} /></button></div>)}</aside>
       <main className="nf-editor-pane"><div className="nf-editor-meta"><span>{activeChapter?.status || '草稿'}</span><span>目标：{activeChapter?.goal || '推进主线，并在结尾留下新的钩子。'}</span></div><input className="nf-chapter-title" value={title} readOnly aria-label="章节标题" /><textarea ref={editorRef} className="nf-editor" value={draft} onChange={(event) => setDraft(event.target.value)} onSelect={reportSelection} onKeyUp={reportSelection} onMouseUp={reportSelection} placeholder="从这里开始写下这一章…" /><footer className="nf-editor-footer"><span>{wordCount.toLocaleString('zh-CN')} 字</span><span>第 {activeChapter?.id || '—'} 章</span><button type="button" onClick={() => sendPrompt('请续写本章正文。')} disabled={Boolean(busy)}><WandSparkles size={14} />续写</button></footer>{selection && <div className="nf-selection-actions"><span>{actionLabel}</span><button type="button" onClick={() => chapterAction('rewrite')} disabled={Boolean(busy)}><PenLine size={14} />改写</button><button type="button" onClick={() => chapterAction('condense')} disabled={Boolean(busy)}>精简</button><button type="button" onClick={() => { sendPrompt(`请分析并优化这段文字：${selection.text}`); setSelection(null) }}><MessageCircleMore size={14} />问阿流</button></div>}</main>
       <aside className="nf-ai-panel"><header><div className="nf-ai-avatar"><Bot size={18} /></div><div><strong>阿流</strong><span>正在读取当前作品与章节上下文</span></div></header><div className="nf-ai-tools"><button type="button" onClick={() => sendPrompt('请给我三个能推动当前章节的转折方向。')} disabled={Boolean(busy)}><Sparkles size={14} />给我下一步</button><button type="button" onClick={() => sendPrompt('请生成本章正文。')} disabled={Boolean(busy)}><WandSparkles size={14} />{busy === 'continue' ? '生成中…' : '生成本章正文'}</button><button type="button" onClick={() => sendPrompt('请检查当前章节的人物动机和伏笔是否一致。')} disabled={Boolean(busy)}><FileCheck2 size={14} />检查一致性</button></div>{notice && <div className="nf-ai-notice">{notice}</div>}{proposal && <section className="nf-ai-proposal"><strong>{proposal.title}</strong>{proposal.type === 'text' ? <p>{proposal.content}</p> : proposal.actions.length ? proposal.actions.map((action) => <article key={`${action.target}-${action.label}`}><span>{action.label}</span><p>{action.reason}</p><small>{action.after}</small></article>) : <p>没有可自动应用的正文修改。</p>}<div><button type="button" onClick={() => setProposal(null)}>放弃</button><button type="button" className="nf-primary-button" onClick={applyProposal}>确认应用</button></div></section>}<div className="nf-chat-list">{messages.map((item, index) => <article className={`nf-chat-message ${item.role} ${item.error ? 'is-error' : ''}`} key={`${item.role}-${index}`}><span>{item.role === 'assistant' ? '阿' : '我'}</span><div><p>{item.content}</p>{item.evidence?.length > 0 && <small>参考：{item.evidence.map((evidence) => evidence.title).join('、')}</small>}{item.action === 'show-editor' && <button type="button" onClick={showEditor}>查看编辑器</button>}{item.role === 'assistant' && !item.error && !item.status && item.instruction && <div className="nf-chat-message-actions"><button type="button" onClick={() => insertAssistantText(item)} disabled={Boolean(busy)}>写入正文</button><button type="button" onClick={() => createAssistantProposal(item)} disabled={Boolean(busy)}>生成修改预览</button></div>}</div></article>)}{busy === 'chat' || busy === 'preview' || busy === 'continue' ? <article className="nf-chat-message assistant"><span>阿</span><div className="nf-chat-loading"><LoaderCircle size={15} />{busy === 'continue' ? '正在生成本章正文…' : '阿流正在思考…'}</div></article> : null}<div ref={chatEndRef} /></div><form className="nf-chat-input" onSubmit={sendMessage}><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleMessageKeyDown} placeholder="问阿流关于这一章的任何问题…" rows="3" /><button type="submit" title="发送给阿流" disabled={Boolean(busy) || !message.trim()}><ArrowUp size={17} /></button></form></aside>
     </div>{toolsOpen && <WritingToolsPanel project={project} chapter={activeChapter} onClose={() => setToolsOpen(false)} onApplyResult={applyToolResult} />}{chapterDialog && <div className="nf-chapter-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeChapterDialog()}><form className="nf-chapter-dialog" role="dialog" aria-modal="true" onSubmit={submitChapter}><header><div><span>{chapterDialog.mode === 'rename' ? '章节设置' : '新建章节'}</span><h2>{chapterDialog.mode === 'rename' ? `编辑第 ${chapterDialog.chapter.id} 章` : '添加下一章'}</h2></div><button type="button" title="关闭" onClick={closeChapterDialog}><X size={17} /></button></header><label>章节名称<input autoFocus value={chapterTitle} onChange={(event) => setChapterTitle(event.target.value)} maxLength="100" required /></label>{chapterDialog.mode === 'create' && <label>章节目标<textarea value={chapterGoal} onChange={(event) => setChapterGoal(event.target.value)} maxLength="1500" placeholder="这一章要推进什么？" /></label>}{chapterError && <p className="nf-chapter-dialog-error">{chapterError}</p>}<footer>{chapterDialog.mode === 'rename' && <button type="button" className="nf-danger-action" onClick={removeCurrentChapter} disabled={busy === 'chapter'}><Trash2 size={14} />{deleteConfirm ? '再次点击确认删除' : '删除章节'}</button>}<span /><button type="button" className="nf-secondary-button" onClick={closeChapterDialog}>取消</button><button type="submit" className="nf-primary-button" disabled={busy === 'chapter' || !chapterTitle.trim()}>{busy === 'chapter' ? <><LoaderCircle size={14} />保存中…</> : '保存章节'}</button></footer></form></div>}{trashOpen && <div className="nf-chapter-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setTrashOpen(false)}><section className="nf-chapter-dialog nf-chapter-trash" role="dialog" aria-modal="true" aria-labelledby="chapter-trash-title"><header><div><span>章节回收站</span><h2 id="chapter-trash-title">恢复误删章节</h2></div><button type="button" title="关闭" onClick={() => setTrashOpen(false)}><X size={17} /></button></header><p>恢复后系统会自动插回原位置、重新编号，并同步该章正文和记忆。</p><div className="nf-chapter-trash-list">{trashItems.length ? trashItems.map((item) => <article key={item.trashId}><div><strong>{item.chapter?.title || '未命名章节'}</strong><span>删除于 {item.deletedAt ? new Date(item.deletedAt).toLocaleString('zh-CN') : '未知时间'}</span></div><button type="button" onClick={() => restoreFromTrash(item)} disabled={busy !== ''}>{busy === `restore:${item.trashId}` ? <LoaderCircle size={14} /> : <><RotateCcw size={14} />恢复</>}</button></article>) : <p>{busy === 'trash' ? '正在读取回收站…' : '回收站为空。'}</p>}</div>{trashError && <p className="nf-chapter-dialog-error">{trashError}</p>}</section></div>}

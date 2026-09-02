@@ -9,7 +9,7 @@ function StoryCard({ item, index, onOpen, onDelete }) {
   if (!item?.id) return null
   const tones = ['nf-cover-mist', 'nf-cover-tower', 'nf-cover-moon']
   const progress = Math.max(0, Math.min(100, Number(item.progress) || 0))
-  return <article className="nf-story-card"><button type="button" className="nf-story-open" onClick={() => onOpen(item.id)}><span className={`nf-story-art ${tones[index % tones.length]}`} aria-hidden="true"><i /><i /><i /></span><strong>{item.title || '未命名作品'}</strong><small>{item.genre || '未分类'} · 已写 {item.writtenChapterCount || 0}/{item.chapterCount || 0} 章</small><div><i style={{ width: `${progress}%` }} /><em>{progress}%</em></div></button><button type="button" className="nf-story-delete" title="移入回收站" aria-label={`删除${item.title || '作品'}`} onClick={(event) => { event.stopPropagation(); onDelete(item) }}><Trash2 size={14} /></button></article>
+  return <article className="nf-story-card"><button type="button" className="nf-story-open" onClick={() => onOpen(item.id)}><span className={`nf-story-art ${item.coverUrl ? 'has-cover' : tones[index % tones.length]}`} aria-hidden="true">{item.coverUrl ? <img src={item.coverUrl} alt="" /> : <><i /><i /><i /></>}</span><strong>{item.title || '未命名作品'}</strong><small>{item.genre || '未分类'} · 已写 {item.writtenChapterCount || 0}/{item.chapterCount || 0} 章</small><div><i style={{ width: `${progress}%` }} /><em>{progress}%</em></div></button><button type="button" className="nf-story-delete" title="移入回收站" aria-label={`删除${item.title || '作品'}`} onClick={(event) => { event.stopPropagation(); onDelete(item) }}><Trash2 size={14} /></button></article>
 }
 
 function HomePage({ project, projects, loading, error, onRetry, onCreate, onOpenProject, onOpenWritingRoom, onProjectsChanged }) {

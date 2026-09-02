@@ -38,14 +38,10 @@ export async function fetchModels() {
   return payload
 }
 export async function configureModel(model) {
-  const response = await request('/api/models/configure', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(model) })
-  setActiveModelId(model.id)
-  return response
+  return request('/api/models/configure', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(model) })
 }
 export async function testModel(id) {
-  const response = await request('/api/models/test', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id }) })
-  setActiveModelId(id)
-  return response
+  return request('/api/models/test', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id }) })
 }
 export const removeModel = (id) => request('/api/models/remove', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id }) })
 export const fetchProjects = async () => {
@@ -61,6 +57,7 @@ export const exportProjectFile = (id, format) => request('/api/projects/export-f
 export const requestClarifications = (settings) => request('/api/project/clarify', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ settings })) })
 export const generateBlueprint = (settings, feedback = '') => request('/api/project/bootstrap', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ settings, feedback })) })
 export const createProject = (settings, blueprint) => request('/api/project/create', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ settings, blueprint })) })
+export const uploadProjectCover = (dataUrl) => request('/api/project/cover', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ dataUrl }) })
 export const saveChapter = (chapter) => request('/api/project/chapters/save', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id: chapter.id, body: chapter.body, summary: chapter.goal || '', baseRevision: chapter.revision }) })
 export const refreshStoryDossier = (chapterId = '') => request('/api/project/dossier/refresh', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ chapterId })) })
 export const createChapter = (chapter) => request('/api/project/chapters/create', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(chapter) })

@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, CheckCircle2, GitBranch, LoaderCircle, Map, RefreshCw, Sparkles, Users } from 'lucide-react'
-import { refreshStoryDossier } from './api.js'
+import { useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ArrowRight, CheckCircle2, GitBranch, ImagePlus, LoaderCircle, Map, RefreshCw, Sparkles, Users } from 'lucide-react'
+import { refreshStoryDossier, uploadProjectCover } from './api.js'
 
 function chapterWords(chapter) { return String(chapter?.body || '').replace(/\s/g, '').length }
 function sourceLabel(value) { return Array.isArray(value) ? value.filter(Boolean).join('、') : String(value || '').trim() }
@@ -12,6 +12,8 @@ function DossierList({ icon: Icon, title, items = [], empty = '保存章节后�
 function ProjectOverviewPage({ project, onBack, onOpenWritingRoom, onProjectRefresh }) {
   const [syncing, setSyncing] = useState(false)
   const [notice, setNotice] = useState('')
+  const [coverBusy, setCoverBusy] = useState(false)
+  const coverInputRef = useRef(null)
   const memory = project?.memory || {}
   const kit = memory.project_kit || {}
   const dossier = memory.story_dossier || {}
@@ -37,9 +39,36 @@ function ProjectOverviewPage({ project, onBack, onOpenWritingRoom, onProjectRefr
     } catch (error) { setNotice(error.message || '资料同步失败，正文不受影响。') } finally { setSyncing(false) }
   }
 
+  function handleCoverChange(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setNotice('封面仅支持 JPG、PNG 或 WEBP 图片。')
+      return
+    }
+    if (file.size > 6 * 1024 * 1024) {
+      setNotice('封面图片不能超过 6MB。')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = async () => {
+      setCoverBusy(true); setNotice('封面保存中…')
+      try {
+        const response = await uploadProjectCover(String(reader.result || ''))
+        onProjectRefresh?.(response.project)
+        setNotice('封面已更新，并同步到首页和左侧当前故事。')
+      } catch (error) { setNotice(error.message || '封面保存失败。') } finally { setCoverBusy(false) }
+    }
+    reader.onerror = () => setNotice('封面读取失败，请重新选择图片。')
+    reader.readAsDataURL(file)
+  }
+
+  const coverUrl = project?.cover?.url || ''
+
   return <div className="nf-project-overview">
     <button type="button" className="nf-back-button" onClick={onBack}><ArrowLeft size={16} />返回首页</button>
-    <section className="nf-project-hero"><div className="nf-project-hero-art nf-cover-mist"><i /><i /><i /></div><div className="nf-project-hero-copy"><span className="nf-project-kicker"><Sparkles size={14} />作品资料</span><h1>{project?.title || '未命名作品'}</h1><p>{synopsis}</p><div className="nf-project-meta"><span>{project?.genre || '未分类'}</span><span>{chapters.length} 章已建立</span><span>{syncText}</span></div><button type="button" className="nf-primary-button" onClick={onOpenWritingRoom}>进入写作房间<ArrowRight size={15} /></button></div></section>
+    <section className="nf-project-hero"><div className={`nf-project-hero-art nf-cover-mist ${coverUrl ? 'has-cover' : ''}`}>{coverUrl ? <img src={coverUrl} alt={`${project?.title || '作品'}封面`} /> : <><i /><i /><i /></>}<button type="button" className="nf-cover-upload-button" onClick={() => coverInputRef.current?.click()} disabled={coverBusy}><ImagePlus size={14} />{coverBusy ? '保存中…' : '更换封面'}</button><input ref={coverInputRef} className="nf-cover-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleCoverChange} /></div><div className="nf-project-hero-copy"><span className="nf-project-kicker"><Sparkles size={14} />作品资料</span><h1>{project?.title || '未命名作品'}</h1><p>{synopsis}</p><div className="nf-project-meta"><span>{project?.genre || '未分类'}</span><span>{chapters.length} 章已建立</span><span>{syncText}</span></div><button type="button" className="nf-primary-button" onClick={onOpenWritingRoom}>进入写作房间<ArrowRight size={15} /></button></div></section>
     <section className="nf-project-progress"><div><span>创作进度</span><strong>{progress}%</strong></div><div className="nf-progress-track"><i style={{ width: `${progress}%` }} /></div><small>{written} / {chapters.length || 0} 章已有正文</small></section>
     <section className="nf-overview-note nf-dossier-sync-note"><CheckCircle2 size={17} /><span>{notice || (updatedThrough ? `资料卡以已保存正文为准，最近同步到第 ${Number(updatedThrough)} 章。` : '当前页面仍显示初始规划；点击同步后，资料卡会改为真实正文事实。')}</span><button type="button" onClick={syncDossier} disabled={syncing || !chapters.length}>{syncing ? <><LoaderCircle size={14} />同步中</> : <><RefreshCw size={14} />从正文更新资料</>}</button></section>
     <section className="nf-overview-section"><div className="nf-section-heading"><div><h2>当前故事状态</h2><p>真实正文优先，初始规划只作为参考。</p></div></div><div className="nf-highlight-grid"><div><CheckCircle2 size={16} /><span><strong>故事阶段</strong>{dossier.storyPhase || '同步后由正文整理'}</span></div><div><CheckCircle2 size={16} /><span><strong>当前状态</strong>{dossier.currentState || '保存章节后生成当前冲突状态'}</span></div><div><CheckCircle2 size={16} /><span><strong>资料来源</strong>{updatedThrough ? `第 1–${Number(updatedThrough)} 章正文` : '尚未建立正文资料档案'}</span></div></div></section>
