@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import novelflow_cloud
+
 
 ROOT = Path(__file__).resolve().parent
 DATABASE_PATH = ROOT / "novelflow.db"
@@ -61,6 +63,12 @@ def _connect() -> sqlite3.Connection:
 
 def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
     """Load active projects, importing the existing JSON registry once."""
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.load_registry(fallback)
+        except Exception:
+            # A transient cloud outage must not make the local editor unusable.
+            pass
     with closing(_connect()) as connection:
         count = int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
         if count == 0:
@@ -75,6 +83,11 @@ def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | None = None) -> None:
+    if connection is None and novelflow_cloud.ready():
+        try:
+            novelflow_cloud.save_registry(registry)
+        except Exception:
+            pass
     owns_connection = connection is None
     db = connection or _connect()
     now = datetime.now(timezone.utc).isoformat()
@@ -155,6 +168,11 @@ def _cosine(left: Counter[str], right: Counter[str]) -> float:
 
 def search_memory_chunks(project_id: str, query: str, limit: int = 12) -> list[dict[str, Any]]:
     """Return local keyword + character n-gram semantic-approximation matches."""
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.search_memory_chunks(project_id, query, limit)
+        except Exception:
+            pass
     query = query.strip()[:500]
     if not query:
         return []
@@ -187,18 +205,33 @@ def search_memory_chunks(project_id: str, query: str, limit: int = 12) -> list[d
 
 
 def soft_delete_project(project_id: str) -> None:
+    if novelflow_cloud.ready():
+        try:
+            novelflow_cloud.soft_delete_project(project_id)
+        except Exception:
+            pass
     with closing(_connect()) as connection:
         connection.execute("UPDATE projects SET deleted_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), project_id))
         connection.commit()
 
 
 def deleted_projects() -> list[dict[str, Any]]:
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.deleted_projects()
+        except Exception:
+            pass
     with closing(_connect()) as connection:
         rows = connection.execute("SELECT id, title, updated_at, deleted_at FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall()
         return [dict(row) for row in rows]
 
 
 def restore_project(project_id: str) -> dict[str, Any] | None:
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.restore_project(project_id)
+        except Exception:
+            pass
     with closing(_connect()) as connection:
         row = connection.execute("SELECT data_json FROM projects WHERE id=? AND deleted_at IS NOT NULL", (project_id,)).fetchone()
         if row is None:
@@ -209,6 +242,11 @@ def restore_project(project_id: str) -> dict[str, Any] | None:
 
 
 def export_project(project_id: str) -> dict[str, Any] | None:
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.export_project(project_id)
+        except Exception:
+            pass
     with closing(_connect()) as connection:
         row = connection.execute("SELECT data_json FROM projects WHERE id=?", (project_id,)).fetchone()
         return json.loads(row["data_json"]) if row else None
