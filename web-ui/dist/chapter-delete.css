@@ -1,0 +1,49 @@
+/* Recoverable chapter deletion controls. */
+.chapter-row { grid-template-columns: 26px minmax(0,1fr) auto 24px 24px !important; }
+.chapter-delete-button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; color: #84928c; font-size: 15px; line-height: 1; opacity: .22; cursor: pointer; transition: opacity .15s ease, color .15s ease, background .15s ease; }
+.chapter-row:hover .chapter-delete-button, .chapter-row.selected .chapter-delete-button, .chapter-delete-button:focus-visible { opacity: 1; }
+.chapter-delete-button:hover, .chapter-delete-button:focus-visible { outline: none; color: #f2c9c5; background: rgba(190,75,67,.18); }
+.chapter-delete-button[aria-disabled="true"] { opacity: .12 !important; cursor: not-allowed; }
+.chapter-trash-button { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; gap: 8px; width: calc(100% - 16px); min-height: 36px; margin: 5px 8px 9px; padding: 0 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 6px; background: rgba(255,255,255,.025); color: #9cacA5; font-size: 12px; text-align: left; cursor: pointer; }
+.chapter-trash-button:hover, .chapter-trash-button:focus-visible { outline: none; border-color: rgba(115,194,166,.25); background: rgba(85,160,135,.09); color: #d1e5dc; }
+.chapter-trash-button em { min-width: 19px; padding: 2px 5px; border-radius: 3px; background: rgba(255,255,255,.07); color: #9eb0a8; font-size: 10px; font-style: normal; text-align: center; }
+.chapter-trash-icon { display: grid; place-items: center; color: #8fa29a; font-size: 14px; }
+.chapter-action-backdrop { position: fixed; inset: 0; z-index: 5000; display: grid; place-items: center; padding: 20px; background: rgba(11,24,20,.52); backdrop-filter: blur(4px); }
+.chapter-action-dialog { width: min(520px, 100%); max-height: min(720px, calc(100vh - 40px)); overflow: auto; padding: 22px; border: 1px solid #d4dfda; border-radius: 8px; background: #fff; box-shadow: 0 24px 70px rgba(18,43,34,.24); color: #283a32; }
+.chapter-action-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid #e4ebe7; }
+.chapter-action-head h2 { margin: 0; color: #1e3028; font-size: 19px; }
+.chapter-action-head p { margin: 6px 0 0; color: #75827c; font-size: 12px; line-height: 1.6; }
+.chapter-action-close { display: grid; flex: 0 0 auto; place-items: center; width: 31px; height: 31px; border: 1px solid #d8e1dc; border-radius: 5px; background: #fff; color: #76847d; font-size: 21px; cursor: pointer; }
+.chapter-action-close:hover, .chapter-action-close:focus-visible { outline: none; border-color: #b7c8c0; background: #f5f8f6; color: #34483e; }
+.chapter-delete-summary { margin-top: 18px; padding: 15px 16px; border: 1px solid #e1e8e4; border-radius: 7px; background: #f8faf9; }
+.chapter-delete-summary > strong { display: block; color: #24382e; font-size: 15px; }
+.chapter-delete-meta { display: flex; gap: 8px; margin-top: 9px; }
+.chapter-delete-meta span { padding: 3px 7px; border-radius: 3px; background: #e9efec; color: #697970; font-size: 10px; }
+.chapter-delete-warning { margin: 14px 0 0; padding: 12px 13px; border-left: 3px solid #c65a50; background: #fff5f4; color: #754c48; font-size: 12px; line-height: 1.65; }
+.chapter-action-error { min-height: 21px; padding-top: 8px; color: #b54840; font-size: 11px; }
+.chapter-action-buttons { display: flex; justify-content: flex-end; gap: 9px; margin-top: 13px; }
+.chapter-action-buttons button { min-height: 37px; padding: 0 14px; border-radius: 6px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.chapter-action-secondary { border: 1px solid #d2ddd7; background: #fff; color: #52645b; }
+.chapter-action-danger { border: 1px solid #b94941; background: #b94941; color: #fff; }
+.chapter-action-danger:hover { border-color: #9f3d36; background: #9f3d36; }
+.chapter-action-buttons button:disabled, .chapter-restore-button:disabled { opacity: .55; cursor: wait; }
+.chapter-trash-content { display: grid; gap: 9px; padding-top: 16px; }
+.chapter-trash-loading, .chapter-trash-empty { padding: 30px 18px; border: 1px dashed #d5dfda; border-radius: 7px; color: #829088; text-align: center; }
+.chapter-trash-empty { display: flex; flex-direction: column; gap: 6px; }
+.chapter-trash-empty strong { color: #4b5d54; font-size: 13px; }
+.chapter-trash-empty span { font-size: 11px; }
+.chapter-trash-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 13px 14px; border: 1px solid #dfe7e3; border-radius: 7px; background: #fbfcfb; }
+.chapter-trash-row strong { display: block; overflow: hidden; color: #2b3e35; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.chapter-trash-row span { display: block; margin-top: 5px; color: #89958f; font-size: 10px; }
+.chapter-restore-button { min-height: 33px; padding: 0 12px; border: 1px solid #2b8465; border-radius: 5px; background: #fff; color: #246c54; font-size: 11px; font-weight: 700; cursor: pointer; }
+.chapter-restore-button:hover { background: #eaf5f0; }
+.chapter-action-toast { position: fixed; left: 50%; bottom: 28px; z-index: 5200; max-width: min(480px, calc(100vw - 32px)); padding: 10px 16px; border: 1px solid #296f57; border-radius: 6px; background: #174d3b; color: #fff; box-shadow: 0 12px 35px rgba(22,56,43,.2); font-size: 12px; opacity: 0; transform: translate(-50%, 8px); transition: opacity .18s ease, transform .18s ease; }
+.chapter-action-toast.show { opacity: 1; transform: translate(-50%, 0); }
+@media (max-width: 760px) {
+  .chapter-action-dialog { padding: 18px; }
+  .chapter-action-buttons { flex-direction: column-reverse; }
+  .chapter-action-buttons button { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chapter-delete-button, .chapter-action-toast { transition: none; }
+}

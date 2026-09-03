@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>NovelFlow</title><script>document.documentElement.classList.add("nf-bootstrap")</script><link rel="stylesheet" href="/legacy-assets/index-EW_RWRyw.css"><link rel="stylesheet" href="/app-state-guard.css"><script defer src="/app-state-guard.js"></script></head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/legacy-assets/index-DfUy_1Rz.js"></script>
+    <script>
+      (() => {
+        let applying = false;
+        let observer = null;
+        let timer = 0;
+        const cleanTitle = (value) => String(value || '').trim()
+          .replace(/^\u7b2c\s*\d+\s*\u7ae0\s*[\u00b7\u30fb|\uff5c:\uff1a-]?\s*/u, '')
+          .replace(/^\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+\u9636\u6bb5\s*[\u00b7\u30fb|\uff5c:\uff1a-]?\s*/u, '');
+        const displayChapterTitle = (value) => {
+          const internalParts = [
+            '\u89e6\u53d1\u4e8b\u4ef6', '\u89e6\u53d1', '\u5173\u7cfb\u5347\u7ea7',
+            '\u4ee3\u4ef7\u4e0e\u53cd\u8f6c', '\u9636\u6bb5\u51b3\u65ad', '\u4e3b\u7ebf\u51b3\u65ad',
+            '\u53d7\u963b', '\u8bd5\u63a2', '\u53cd\u8bc1', '\u5347\u7ea7', '\u8bbe\u5c40', '\u903c\u8fd1', '\u51b3\u65ad', '\u5f85\u7ec6\u5316'
+          ];
+          const parts = cleanTitle(value).split(/[\u00b7\u30fb|\uff5c]/u).map((item) => item.trim()).filter(Boolean);
+          const meaningful = parts.filter((part) => !internalParts.includes(part) && !/^\u7b2c.+\u9636\u6bb5$/u.test(part) && !/^\u7b2c[\u4e00-\u9fff]+\u7ae0$/u.test(part));
+          return meaningful.join(' \u00b7 ') || '\u672a\u547d\u540d\u7ae0\u8282';
+        };
+        const openRenameDialog = (project, chapterId) => {
+          document.querySelector('.chapter-rename-backdrop')?.remove();
+          const chapter = (project?.chapters || []).find((item) => String(item.id) === String(chapterId));
+          if (!chapter) return;
+          const backdrop = document.createElement('div');
+          backdrop.className = 'chapter-rename-backdrop';
+          const dialog = document.createElement('form');
+          dialog.className = 'chapter-rename-dialog';
+          const heading = document.createElement('h2');
+          heading.textContent = `\u4fee\u6539\u7b2c ${Number(chapterId)} \u7ae0\u540d\u79f0`;
+          const copy = document.createElement('p');
+          copy.textContent = '\u53ea\u4fee\u6539\u7ae0\u8282\u540d\u79f0\uff0c\u4e0d\u4f1a\u6539\u52a8\u6b63\u6587\u548c\u6545\u4e8b\u8ba1\u5212\u3002';
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.maxLength = 100;
+          input.value = displayChapterTitle(chapter.title) === '\u672a\u547d\u540d\u7ae0\u8282' ? '' : displayChapterTitle(chapter.title);
+          input.placeholder = '\u8f93\u5165\u65b0\u7684\u7ae0\u8282\u540d\u79f0';
+          const error = document.createElement('span');
+          error.className = 'chapter-rename-error';
+          const actions = document.createElement('div');
+          actions.className = 'chapter-rename-actions';
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.textContent = '\u53d6\u6d88';
+          const save = document.createElement('button');
+          save.type = 'submit';
+          save.className = 'primary';
+          save.textContent = '\u4fdd\u5b58\u540d\u79f0';
+          actions.append(cancel, save);
+          dialog.append(heading, copy, input, error, actions);
+          backdrop.append(dialog);
+          document.body.append(backdrop);
+          const close = () => backdrop.remove();
+          cancel.addEventListener('click', close);
+          backdrop.addEventListener('mousedown', (event) => { if (event.target === backdrop) close(); });
+          dialog.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const title = input.value.trim();
+            if (!title) { error.textContent = '\u8bf7\u8f93\u5165\u7ae0\u8282\u540d\u79f0'; input.focus(); return; }
+            save.disabled = true;
+            save.textContent = '\u6b63\u5728\u4fdd\u5b58\u2026';
+            error.textContent = '';
+            try {
+              const response = await fetch('/api/project/chapters/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: String(chapterId), title })
+              });
+              const result = await response.json().catch(() => ({}));
+              if (!response.ok) throw new Error(result.error || '\u7ae0\u8282\u540d\u79f0\u4fdd\u5b58\u5931\u8d25');
+              chapter.title = result.chapter?.title || title;
+              window.location.reload();
+            } catch (requestError) {
+              error.textContent = requestError.message || '\u7ae0\u8282\u540d\u79f0\u4fdd\u5b58\u5931\u8d25';
+              save.disabled = false;
+              save.textContent = '\u4fdd\u5b58\u540d\u79f0';
+            }
+          });
+          window.setTimeout(() => { input.focus(); input.select(); }, 0);
+        };
+        const ensureChapterRows = (project) => {
+          document.querySelectorAll('.chapter-row').forEach((row) => {
+            const chapterId = row.querySelector('.chapter-number')?.textContent?.trim();
+            const chapter = (project?.chapters || []).find((item) => String(item.id) === String(chapterId));
+            const name = row.querySelector('.chapter-name');
+            if (chapter && name) {
+              const title = displayChapterTitle(chapter.title);
+              if (name.textContent !== title) name.textContent = title;
+            }
+            if (!chapterId || row.querySelector('.chapter-rename-button')) return;
+            const edit = document.createElement('span');
+            edit.className = 'chapter-rename-button';
+            edit.setAttribute('role', 'button');
+            edit.setAttribute('tabindex', '0');
+            edit.setAttribute('title', '\u4fee\u6539\u7ae0\u8282\u540d\u79f0');
+            edit.setAttribute('aria-label', '\u4fee\u6539\u7ae0\u8282\u540d\u79f0');
+            edit.textContent = '\u270e';
+            const activate = (event) => { event.preventDefault(); event.stopPropagation(); openRenameDialog(project, chapterId); };
+            edit.addEventListener('click', activate);
+            edit.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') activate(event); });
+            row.append(edit);
+          });
+        };
+        const ensureModeSwitch = () => {
+          if (document.querySelector('.novelflow-mode-switch')) return;
+          const labels = Array.from(document.querySelectorAll('.sidebar-group-label'));
+          const label = labels.find((node) => node.textContent.includes('\u6545\u4e8b\u8d44\u6599'));
+          if (!label) return;
+          const switcher = document.createElement('div');
+          switcher.className = 'novelflow-mode-switch';
+          const setMode = (mode) => {
+            document.body.classList.toggle('novelflow-simple', mode === 'simple');
+            localStorage.setItem('novelflow-ui-mode', mode);
+            switcher.querySelectorAll('button').forEach((button) => button.classList.toggle('active', button.dataset.mode === mode));
+          };
+          [['simple', '\u7b80\u6d01'], ['pro', '\u4e13\u4e1a']].forEach(([mode, text]) => {
+            const button = document.createElement('button'); button.type = 'button'; button.dataset.mode = mode; button.textContent = text;
+            button.addEventListener('click', () => setMode(mode)); switcher.append(button);
+          });
+          label.after(switcher);
+          setMode(localStorage.getItem('novelflow-ui-mode') || 'simple');
+        };
+        const ensureAssistantWelcome = (project) => {
+          const list = document.querySelector('.message-list');
+          if (!list) return;
+          const welcome = list.querySelector('.assistant-empty-welcome');
+          const hasConversation = Array.from(list.children).some((child) => child !== welcome && child.textContent.trim());
+          if (hasConversation) { welcome?.remove(); return; }
+          if (welcome) return;
+          const empty = document.createElement('div'); empty.className = 'assistant-empty-welcome';
+          const heading = document.createElement('strong');
+          const title = String(project?.title || '\u5f53\u524d\u4f5c\u54c1').replace(/[\u300a\u300b]/g, '');
+          heading.textContent = `\u6b63\u5728\u521b\u4f5c\u300a${title}\u300b`;
+          const copy = document.createElement('span');
+          copy.textContent = '\u4f60\u53ef\u4ee5\u8ba9 AI \u5e2e\u4f60\u60f3\u5267\u60c5\u3001\u4fee\u6539\u672c\u7ae0\uff0c\u6216\u7ee7\u7eed\u5f80\u4e0b\u5199\u3002';
+          empty.append(heading, copy); list.prepend(empty);
+        };
+        const apply = (project) => {
+          if (applying) return;
+          applying = true;
+          try {
+            const chapterCount = project?.chapters?.length || 0;
+            const lengthMode = project?.settings?.lengthMode || '';
+            const isShort = lengthMode === 'short' || chapterCount <= 20;
+            document.body.classList.toggle('novelflow-short-story', isShort);
+            const volumes = project?.memory?.project_kit?.volumes || project?.memory?.volumes || [];
+            const first = volumes[0];
+            const group = document.querySelector('.chapter-group');
+            if (group && group.firstChild) {
+              const volumeTitle = first ? String(first.title || '').replace(/^\u7b2c[^\s]+\u5377\s*[\u00b7\u30fb|\uff5c:\uff1a-]?\s*/u, '').trim() : '';
+              const label = isShort ? `\u5168\u90e8\u7ae0\u8282 \u00b7 ${chapterCount} \u7ae0 ` : `\u7b2c 1 \u5377${volumeTitle ? ` \u00b7 ${volumeTitle}` : ''} `;
+              if (group.firstChild.nodeValue !== label) group.firstChild.nodeValue = label;
+            }
+            ensureChapterRows(project);
+            ensureModeSwitch();
+            ensureAssistantWelcome(project);
+          } finally { applying = false; }
+        };
+        const schedule = (project) => { window.clearTimeout(timer); timer = window.setTimeout(() => apply(project), 100); };
+        fetch('/api/project').then((response) => response.ok ? response.json() : null).then((payload) => {
+          const project = payload?.project || payload;
+          if (!project) return;
+          schedule(project);
+          observer = new MutationObserver(() => schedule(project));
+          observer.observe(document.body, { childList: true, subtree: true });
+        }).catch(() => {});
+      })();
+    </script>
+    <link rel="stylesheet" href="/story-overview.css">
+    <link rel="stylesheet" href="/chapter-delete.css">
+    <script src="/story-overview.js"></script>
+    <script src="/chapter-delete.js"></script>
+    <link rel="stylesheet" href="/collaboration-overhaul.css">
+    <script src="/collaboration-overhaul.js"></script>
+  </body>
+</html>

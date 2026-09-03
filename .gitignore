@@ -60,3 +60,5 @@ pyproject.toml
 .DS_Store
 .vite/
 **/.vite/
+!web-ui/dist/
+!web-ui/dist/**

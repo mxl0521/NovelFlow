@@ -1,0 +1,83 @@
+html.nf-bootstrap #root {
+  visibility: hidden;
+}
+
+.nf-state {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px;
+  color: #20231f;
+  text-align: center;
+  background: #f5f5f1;
+  font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+}
+
+.nf-state-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  margin-bottom: 6px;
+  border: 1px solid #cfd2ca;
+  border-radius: 50%;
+  color: #47604b;
+  background: #fff;
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.nf-state-offline .nf-state-mark {
+  color: #9b3d32;
+  border-color: #dec0ba;
+}
+
+.nf-state h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.nf-state p {
+  max-width: 520px;
+  margin: 0 0 10px;
+  color: #666b63;
+  font-size: 15px;
+  line-height: 1.7;
+  letter-spacing: 0;
+}
+
+.nf-state-action {
+  min-height: 42px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  background: #405846;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nf-state-action:hover {
+  background: #33483a;
+}
+
+.nf-state-checking .nf-state-action {
+  display: none;
+}
+html.nf-no-project .current-book,
+html.nf-no-project .current-task-card,
+html.nf-no-project .asset-nav,
+html.nf-no-project .novelflow-mode-switch,
+html.nf-no-project .chapter-tree-title,
+html.nf-no-project .chapter-group,
+html.nf-no-project .chapter-list,
+html.nf-no-project .new-chapter {
+  display: none !important;
+}

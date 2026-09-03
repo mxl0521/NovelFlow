@@ -43,6 +43,7 @@ from novelflow_storage import (
 )
 from novelflow_secrets import delete_secret, get_secret, set_secret
 from novelflow_vector_memory import search_semantic_chunks
+import novelflow_cloud
 from openai import APIConnectionError, APITimeoutError, APIStatusError, AuthenticationError, BadRequestError, NotFoundError, OpenAI, PermissionDeniedError, RateLimitError
 
 
@@ -1848,7 +1849,13 @@ class ApiHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         request_path = urlparse(self.path).path
         if request_path == "/api/health":
-            self._send_json(HTTPStatus.OK, {"ok": True, "configured": any(profile_api_key(profile) for profile in PROFILES)})
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "configured": any(profile_api_key(profile) for profile in PROFILES),
+                "storage": "supabase" if novelflow_cloud.ready() else "sqlite",
+                "supabaseConfigured": novelflow_cloud.enabled(),
+                "supabaseReady": novelflow_cloud.ready(),
+            })
             return
         if request_path == "/api/security":
             self._send_json(HTTPStatus.OK, {
@@ -1918,7 +1925,10 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _serve_static(self, request_path: str) -> None:
         """Serve the Vite build in production while keeping API routes separate."""
         if not STATIC_ROOT.is_dir():
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "未找到接口"})
+            self._send_json(HTTPStatus.NOT_FOUND, {
+                "error": "前端构建产物未部署",
+                "hint": "请确认 web-ui/dist 已随代码发布到 Heroku，或为 Heroku 添加 Node buildpack 先构建前端。",
+            })
             return
         relative = unquote(request_path.lstrip("/"))
         candidate = (STATIC_ROOT / relative).resolve() if relative else STATIC_ROOT / "index.html"
