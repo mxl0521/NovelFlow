@@ -336,11 +336,14 @@ def supabase_auth_error_message(exc: Exception, action: str) -> str:
     return f"{action}失败，请检查网络和 Supabase 配置后重试。"
 
 
-def supabase_sign_up(email: str, password: str) -> dict[str, Any]:
+def supabase_sign_up(email: str, password: str, redirect_url: str = "") -> dict[str, Any]:
+    signup_payload: dict[str, str] = {"email": email, "password": password}
+    if redirect_url:
+        signup_payload["email_redirect_to"] = redirect_url
     response = supabase_request(
         "POST",
         "/auth/v1/signup",
-        json={"email": email, "password": password},
+        json=signup_payload,
     )
     payload = response.json()
     return payload if isinstance(payload, dict) else {}
@@ -2056,6 +2059,14 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _session_user_payload(self) -> dict[str, Any]:
         return safe_session_user(self.session_user)
 
+    def _email_confirmation_redirect(self) -> str:
+        """Return the same trusted browser origin for Supabase confirmation links."""
+        origin = self.headers.get("Origin", "").strip().rstrip("/")
+        host = self.headers.get("Host", "")
+        if origin_allowed(origin, host):
+            return f"{origin}/?confirmed=1"
+        return ""
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json_bytes(payload)
         origin = self.headers.get("Origin", "")
@@ -2113,7 +2124,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "邮箱或密码不正确"})
             return
         try:
-            session = supabase_sign_up(email, password)
+            session = supabase_sign_up(email, password, self._email_confirmation_redirect())
         except Exception as exc:
             logging.warning("supabase sign-up failed: %s", type(exc).__name__)
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": supabase_auth_error_message(exc, "注册")})
