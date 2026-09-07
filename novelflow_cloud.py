@@ -1,8 +1,8 @@
 """Small Supabase PostgREST adapter used by the optional cloud storage mode.
 
-This module deliberately uses the server-side service key only. It is a
-compatibility layer for the current single-user API; user-scoped auth will
-provide the owner UUID in the next migration phase.
+This module deliberately uses the server-side service key only. It stores
+project snapshots, memory chunks and per-user model profiles behind
+owner-scoped queries so the browser never receives the service credential.
 """
 
 from __future__ import annotations
@@ -10,18 +10,44 @@ from __future__ import annotations
 import math
 import os
 import re
+import json
 from datetime import datetime, timezone
-from typing import Any
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
+
+from novelflow_secrets import open_secret, seal_secret
+
+_OWNER_ID: ContextVar[str] = ContextVar("novelflow_owner_id", default="")
 
 
 def enabled() -> bool:
     return bool(os.getenv("SUPABASE_URL", "").strip() and os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip())
 
 
+def require_auth() -> bool:
+    raw = os.getenv("NOVELFLOW_REQUIRE_AUTH", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def set_owner_id(value: str) -> object:
+    return _OWNER_ID.set(value.strip())
+
+
+def reset_owner_id(token: object) -> None:
+    try:
+        _OWNER_ID.reset(token)
+    except Exception:
+        _OWNER_ID.set("")
+
+
 def owner_id() -> str:
+    current = _OWNER_ID.get().strip()
+    if current:
+        return current
+    if require_auth():
+        return ""
     return os.getenv("NOVELFLOW_TENANT_ID", "").strip()
 
 
@@ -134,6 +160,61 @@ def save_registry(registry: dict[str, Any]) -> None:
                     "content": content,
                     "updated_at": now,
                 })
+
+
+def load_model_profiles() -> list[dict[str, Any]]:
+    if not ready():
+        return []
+    rows = _request("GET", "novelflow_model_profiles", params={
+        "owner_id": f"eq.{owner_id()}",
+        "select": "id,name,provider,model,api_key,base_url,protocol,api_mode,extra_headers,updated_at",
+        "order": "updated_at.desc",
+    }).json()
+    profiles: list[dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        extra_headers = row.get("extra_headers", {})
+        if not isinstance(extra_headers, dict):
+            extra_headers = {}
+        profiles.append({
+            "id": str(row.get("id", "")),
+            "name": str(row.get("name", "")),
+            "provider": str(row.get("provider", "")),
+            "model": str(row.get("model", "")),
+            "key_env": "",
+            "base_url": row.get("base_url") or None,
+            "protocol": str(row.get("protocol", "openai")),
+            "api_mode": str(row.get("api_mode", "chat")),
+            "extra_headers": extra_headers,
+            "api_key": open_secret(str(row.get("api_key", ""))),
+            "managed": True,
+        })
+    return profiles
+
+
+def save_model_profiles(profiles: list[dict[str, Any]]) -> None:
+    if not ready():
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    _request("DELETE", "novelflow_model_profiles", params={"owner_id": f"eq.{owner_id()}"})
+    for profile in profiles:
+        if not isinstance(profile, dict) or not profile.get("id"):
+            continue
+        payload = {
+            "owner_id": owner_id(),
+            "id": str(profile.get("id", "")),
+            "name": str(profile.get("name", "未命名模型"))[:80],
+            "provider": str(profile.get("provider", "OpenAI 兼容接口"))[:60],
+            "model": str(profile.get("model", ""))[:120],
+            "api_key": seal_secret(str(profile.get("api_key", ""))),
+            "base_url": str(profile.get("base_url") or "").strip() or None,
+            "protocol": str(profile.get("protocol", "openai")).strip().lower() or "openai",
+            "api_mode": str(profile.get("api_mode", "chat")).strip().lower() or "chat",
+            "extra_headers": profile.get("extra_headers", {}) if isinstance(profile.get("extra_headers", {}), dict) else {},
+            "updated_at": str(profile.get("updated_at") or now),
+        }
+        _request("POST", "novelflow_model_profiles", params={"on_conflict": "owner_id,id"}, json=payload)
 
 
 def deleted_projects() -> list[dict[str, Any]]:

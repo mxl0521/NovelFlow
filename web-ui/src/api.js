@@ -1,8 +1,25 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 const ACTIVE_MODEL_KEY = 'novelflow.activeModelId'
+const SESSION_KEY = 'novelflow.session'
 
 function storedActiveModelId() {
   try { return window.localStorage.getItem(ACTIVE_MODEL_KEY) || '' } catch { return '' }
+}
+
+function storedSession() {
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function persistSession(session) {
+  try {
+    if (session && session.accessToken) window.localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+    else window.localStorage.removeItem(SESSION_KEY)
+  } catch { /* ignore storage failures */ }
 }
 
 export function getActiveModelId() { return storedActiveModelId() }
@@ -13,6 +30,18 @@ export function setActiveModelId(id) {
   } catch { /* localStorage may be unavailable in restricted browser contexts */ }
 }
 
+export function getStoredSession() {
+  return storedSession()
+}
+
+export function setStoredSession(session) {
+  persistSession(session)
+}
+
+export function clearStoredSession() {
+  persistSession(null)
+}
+
 function withActiveModel(payload = {}) {
   const profileId = storedActiveModelId()
   if (!profileId) throw new Error('请先在设置中配置并测试一个模型，再开始 AI 创作')
@@ -20,10 +49,37 @@ function withActiveModel(payload = {}) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, options)
+  const session = storedSession()
+  const headers = { ...(options.headers || {}) }
+  if (session && session.accessToken) headers.Authorization = 'Bearer ' + session.accessToken
+  const response = await fetch(path, { ...options, headers })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.error || '请求失败，请稍后重试')
+  if (!response.ok) {
+    const error = new Error(payload.error || '请求失败，请稍后重试')
+    error.status = response.status
+    throw error
+  }
   return payload
+}
+
+export const fetchSessionConfig = () => request('/api/session/config')
+export const fetchCurrentUser = () => request('/api/session/me')
+export async function signIn(email, password) {
+  const payload = await request('/api/session/sign-in', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email, password }) })
+  if (payload.session && payload.session.accessToken) persistSession(payload.session)
+  return payload
+}
+export async function signUp(email, password) {
+  const payload = await request('/api/session/sign-up', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email, password }) })
+  if (payload.session && payload.session.accessToken) persistSession(payload.session)
+  return payload
+}
+export async function signOut() {
+  try {
+    await request('/api/session/sign-out', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({}) })
+  } finally {
+    persistSession(null)
+  }
 }
 
 export const fetchProject = () => request('/api/project')

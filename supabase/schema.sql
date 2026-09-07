@@ -30,8 +30,27 @@ create table if not exists public.novelflow_memory_chunks (
 create index if not exists novelflow_memory_owner_project_idx
   on public.novelflow_memory_chunks (owner_id, project_id, chapter_id);
 
+create table if not exists public.novelflow_model_profiles (
+  owner_id uuid not null,
+  id text not null,
+  name text not null default '未命名模型',
+  provider text not null default 'OpenAI 兼容接口',
+  model text not null default '',
+  api_key text not null default '',
+  base_url text,
+  protocol text not null default 'openai',
+  api_mode text not null default 'chat',
+  extra_headers jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, id)
+);
+
+create index if not exists novelflow_model_profiles_owner_updated_idx
+  on public.novelflow_model_profiles (owner_id, updated_at desc);
+
 alter table public.novelflow_projects enable row level security;
 alter table public.novelflow_memory_chunks enable row level security;
+alter table public.novelflow_model_profiles enable row level security;
 
 drop policy if exists novelflow_projects_owner_select on public.novelflow_projects;
 create policy novelflow_projects_owner_select on public.novelflow_projects
@@ -59,5 +78,19 @@ drop policy if exists novelflow_memory_owner_delete on public.novelflow_memory_c
 create policy novelflow_memory_owner_delete on public.novelflow_memory_chunks
   for delete using (owner_id = auth.uid());
 
+drop policy if exists novelflow_model_profiles_owner_select on public.novelflow_model_profiles;
+create policy novelflow_model_profiles_owner_select on public.novelflow_model_profiles
+  for select using (owner_id = auth.uid());
+drop policy if exists novelflow_model_profiles_owner_insert on public.novelflow_model_profiles;
+create policy novelflow_model_profiles_owner_insert on public.novelflow_model_profiles
+  for insert with check (owner_id = auth.uid());
+drop policy if exists novelflow_model_profiles_owner_update on public.novelflow_model_profiles;
+create policy novelflow_model_profiles_owner_update on public.novelflow_model_profiles
+  for update using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+drop policy if exists novelflow_model_profiles_owner_delete on public.novelflow_model_profiles;
+create policy novelflow_model_profiles_owner_delete on public.novelflow_model_profiles
+  for delete using (owner_id = auth.uid());
+
 comment on table public.novelflow_projects is 'NovelFlow project snapshots; one row per tenant and project';
 comment on table public.novelflow_memory_chunks is 'Searchable chapter chunks indexed from project snapshots';
+comment on table public.novelflow_model_profiles is 'Per-user AI model profiles and encrypted API keys';

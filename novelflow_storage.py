@@ -67,8 +67,11 @@ def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
         try:
             return novelflow_cloud.load_registry(fallback)
         except Exception:
-            # A transient cloud outage must not make the local editor unusable.
-            pass
+            # When cloud persistence is enabled we prefer returning the caller's
+            # empty fallback rather than accidentally mixing in shared local data.
+            return fallback
+    if novelflow_cloud.enabled():
+        return fallback
     with closing(_connect()) as connection:
         count = int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
         if count == 0:
@@ -87,7 +90,9 @@ def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | Non
         try:
             novelflow_cloud.save_registry(registry)
         except Exception:
-            pass
+            return
+    if connection is None and novelflow_cloud.enabled():
+        return
     owns_connection = connection is None
     db = connection or _connect()
     now = datetime.now(timezone.utc).isoformat()
@@ -172,7 +177,9 @@ def search_memory_chunks(project_id: str, query: str, limit: int = 12) -> list[d
         try:
             return novelflow_cloud.search_memory_chunks(project_id, query, limit)
         except Exception:
-            pass
+            return []
+    if novelflow_cloud.enabled():
+        return []
     query = query.strip()[:500]
     if not query:
         return []
@@ -209,7 +216,9 @@ def soft_delete_project(project_id: str) -> None:
         try:
             novelflow_cloud.soft_delete_project(project_id)
         except Exception:
-            pass
+            return
+    if novelflow_cloud.enabled():
+        return
     with closing(_connect()) as connection:
         connection.execute("UPDATE projects SET deleted_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), project_id))
         connection.commit()
@@ -220,7 +229,9 @@ def deleted_projects() -> list[dict[str, Any]]:
         try:
             return novelflow_cloud.deleted_projects()
         except Exception:
-            pass
+            return []
+    if novelflow_cloud.enabled():
+        return []
     with closing(_connect()) as connection:
         rows = connection.execute("SELECT id, title, updated_at, deleted_at FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").fetchall()
         return [dict(row) for row in rows]
@@ -231,7 +242,9 @@ def restore_project(project_id: str) -> dict[str, Any] | None:
         try:
             return novelflow_cloud.restore_project(project_id)
         except Exception:
-            pass
+            return None
+    if novelflow_cloud.enabled():
+        return None
     with closing(_connect()) as connection:
         row = connection.execute("SELECT data_json FROM projects WHERE id=? AND deleted_at IS NOT NULL", (project_id,)).fetchone()
         if row is None:
@@ -246,7 +259,9 @@ def export_project(project_id: str) -> dict[str, Any] | None:
         try:
             return novelflow_cloud.export_project(project_id)
         except Exception:
-            pass
+            return None
+    if novelflow_cloud.enabled():
+        return None
     with closing(_connect()) as connection:
         row = connection.execute("SELECT data_json FROM projects WHERE id=?", (project_id,)).fetchone()
         return json.loads(row["data_json"]) if row else None

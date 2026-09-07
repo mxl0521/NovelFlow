@@ -7,7 +7,7 @@ import HomePage from './HomePage.jsx'
 import QuickCreateFlow from './QuickCreateFlow.jsx'
 import ProjectOverviewPage from './ProjectOverviewPage.jsx'
 import WritingRoom from './WritingRoom.jsx'
-import { configureModel, createProject, fetchModels, fetchProject, fetchProjects, generateBlueprint, getActiveModelId, removeModel, requestClarifications, selectProject, setActiveModelId, testModel } from './api.js'
+import { clearStoredSession, configureModel, createProject, fetchCurrentUser, fetchModels, fetchProject, fetchProjects, fetchSessionConfig, generateBlueprint, getActiveModelId, getStoredSession, removeModel, requestClarifications, selectProject, setActiveModelId, signIn, signOut, signUp, testModel } from './api.js'
 import { Bell, BookOpen, Bot, CheckCircle2, KeyRound, LoaderCircle, Pencil, Search, Settings, Sparkles, Trash2, UsersRound, X } from 'lucide-react'
 import './Utility.css'
 
@@ -29,6 +29,10 @@ function applyWorkspaceStyles(frame, initialIdea = '') {
   ideaInput.dispatchEvent(new window.Event('input', { bubbles: true }))
 }
 
+function AuthGate({ authRequired, authBusy, error, mode, email, password, confirmationMessage, onChangeMode, onChangeEmail, onChangePassword, onSubmit, onClearError }) {
+  return <main style={{ minHeight: '100svh', display: 'grid', placeItems: 'center', padding: '24px', background: 'linear-gradient(180deg,#f7f2ea 0%,#edf3ef 100%)' }}><section className="nf-settings-section" style={{ width: 'min(460px, 100%)', gap: '16px', padding: '24px', borderRadius: '12px', boxShadow: '0 20px 50px rgba(12,30,44,.12)' }}><div className="nf-utility-heading" style={{ alignItems: 'center' }}><div className="nf-ai-orb"><Bot size={20} /></div><div><h1 style={{ margin: 0, fontFamily: 'Songti SC, STSong, serif', fontSize: '24px', fontWeight: 500 }}>{authRequired ? '登录后继续使用你的作品空间' : '同步你的创作会话'}</h1><p style={{ margin: '6px 0 0', color: '#7b8580', fontSize: '12px', lineHeight: 1.7 }}>{authRequired ? '当前平台已启用账号隔离。请先登录或注册，再进入作品、设置和写作房间。' : '如果你已经有登录态，可以继续同步当前会话。'}</p></div></div><form onSubmit={onSubmit} style={{ display: 'grid', gap: '13px' }}><label style={{ display: 'grid', gap: '7px', color: '#5c6962', fontSize: '11px' }}>邮箱<input style={{ width: '100%', height: '40px', padding: '0 11px', border: '1px solid #d9d2c8', borderRadius: '6px', outline: 0, color: 'var(--nf-ink)', background: '#fffdf9', fontSize: '12px' }} type="email" autoComplete="email" value={email} onChange={(event) => { onClearError(); onChangeEmail(event.target.value) }} placeholder="name@example.com" required /></label><label style={{ display: 'grid', gap: '7px', color: '#5c6962', fontSize: '11px' }}>密码<input style={{ width: '100%', height: '40px', padding: '0 11px', border: '1px solid #d9d2c8', borderRadius: '6px', outline: 0, color: 'var(--nf-ink)', background: '#fffdf9', fontSize: '12px' }} type="password" autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} value={password} onChange={(event) => { onClearError(); onChangePassword(event.target.value) }} placeholder="至少 8 位" required /></label><div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}><button type="submit" className="nf-primary-button" style={{ flex: 1 }} disabled={authBusy}>{authBusy ? <><LoaderCircle size={14} />{mode === 'sign-in' ? '登录中…' : '注册中…'}</> : mode === 'sign-in' ? '登录' : '注册'}</button><button type="button" className="nf-quiet-button" style={{ flex: 1 }} onClick={onChangeMode}>{mode === 'sign-in' ? '没有账号，去注册' : '已有账号，去登录'}</button></div></form>{confirmationMessage && <p style={{ margin: 0, padding: '10px 12px', border: '1px solid #cfe2d7', borderRadius: '7px', color: '#3e6f61', background: '#edf7f1' }}>{confirmationMessage}</p>}{error && <p className="nf-settings-error" role="alert">{error}</p>}</section></main>
+}
+
 function App() {
   const [screen, setScreen] = useState('landing')
   const [initialIdea, setInitialIdea] = useState('')
@@ -37,8 +41,54 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [authRequired, setAuthRequired] = useState(false)
+  const [authReady, setAuthReady] = useState(false)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authMode, setAuthMode] = useState('sign-in')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authMessage, setAuthMessage] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [sessionUser, setSessionUser] = useState(null)
 
   useEffect(() => { fetchModels().catch(() => {}) }, [])
+  useEffect(() => {
+    let active = true
+    async function bootstrapSession() {
+      setAuthReady(false)
+      setAuthError('')
+      try {
+        const config = await fetchSessionConfig()
+        if (!active) return
+        const requiresAuth = Boolean(config?.authRequired)
+        setAuthRequired(requiresAuth)
+        const stored = getStoredSession()
+        if (stored?.accessToken) {
+          try {
+            const me = await fetchCurrentUser()
+            if (!active) return
+            setSessionUser(me?.user || null)
+            setScreen('home')
+          } catch {
+            clearStoredSession()
+            if (!active) return
+            setSessionUser(null)
+            if (requiresAuth) setScreen('landing')
+          }
+        } else {
+          setSessionUser(null)
+        }
+      } catch (error) {
+        if (!active) return
+        setAuthRequired(false)
+        setAuthError(error.message || '无法读取登录配置')
+      } finally {
+        if (active) setAuthReady(true)
+      }
+    }
+    bootstrapSession()
+    return () => { active = false }
+  }, [])
 
   const refreshProjects = useCallback(async () => {
     setLoading(true); setLoadError('')
@@ -50,6 +100,53 @@ function App() {
   }, [])
 
   useEffect(() => { if (['home', 'stories', 'progress', 'notes', 'characters', 'world', 'stats', 'settings'].includes(screen)) refreshProjects() }, [refreshProjects, screen])
+
+  const handleAuthModeToggle = () => {
+    setAuthError('')
+    setAuthMessage('')
+    setAuthMode((current) => current === 'sign-in' ? 'sign-up' : 'sign-in')
+  }
+
+  const handleAuthSubmit = async (event) => {
+    event.preventDefault()
+    setAuthBusy(true)
+    setAuthError('')
+    setAuthMessage('')
+    try {
+      const email = authEmail.trim()
+      const password = authPassword
+      const payload = authMode === 'sign-in' ? await signIn(email, password) : await signUp(email, password)
+      if (payload?.user) setSessionUser(payload.user)
+      if (payload?.session?.accessToken) {
+        setScreen('home')
+        setAuthEmail('')
+        setAuthPassword('')
+      } else if (payload?.needsConfirmation) {
+        setAuthMessage('注册成功，请先去邮箱完成确认，然后再登录。')
+      } else {
+        setAuthMessage(authMode === 'sign-in' ? '登录成功。' : '请求已提交。')
+      }
+    } catch (error) {
+      setAuthError(error.message || '登录失败')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const handleSignOut = async () => {
+    setAuthBusy(true)
+    setAuthError('')
+    try {
+      await signOut()
+    } catch (error) {
+      setAuthError(error.message || '退出失败')
+    } finally {
+      clearStoredSession()
+      setSessionUser(null)
+      setAuthMessage('')
+      setAuthBusy(false)
+    }
+  }
 
   const openHome = (idea = '') => { setInitialIdea(idea); setScreen('home'); setCreateOpen(Boolean(idea)) }
   const handleProjectSelect = async (projectId) => {
@@ -68,6 +165,8 @@ function App() {
     return <WorkspaceView view={screen} project={project} projects={visibleProjects} onOpenCreator={() => setCreateOpen(true)} onOpenWritingRoom={() => setScreen('writing')} />
   }
 
+  if (!authReady) return <main className="nf-auth-page"><section className="nf-auth-card"><div className="nf-auth-brand"><div className="nf-ai-orb"><LoaderCircle size={20} /></div><div><span>NovelFlow</span><strong>正在检查登录状态</strong></div></div><p>正在读取 Supabase 会话和用户权限。</p></section></main>
+  if (authRequired && !sessionUser) return <AuthGate authRequired={authRequired} authBusy={authBusy} error={authError} mode={authMode} email={authEmail} password={authPassword} confirmationMessage={authMessage} onChangeMode={handleAuthModeToggle} onChangeEmail={setAuthEmail} onChangePassword={setAuthPassword} onSubmit={handleAuthSubmit} onClearError={() => { setAuthError(''); setAuthMessage('') }} />
   if (screen === 'landing') return <LandingPage onStart={openHome} />
   if (screen === 'legacy') return <iframe className="novelflow-legacy-frame" title="NovelFlow legacy 写作房间" src="/novelflow-legacy.html" onLoad={(event) => applyWorkspaceStyles(event.currentTarget, initialIdea)} />
   if (screen === 'writing') return <WritingRoom project={project} onBack={() => setScreen('project')} onProjectRefresh={setProject} />
@@ -75,7 +174,7 @@ function App() {
   return <AppShell project={project} view={screen} onNavigate={navigate} onOpenCreator={() => setCreateOpen(true)} onOpenWritingRoom={() => setScreen('writing')} onOpenAssistant={openAssistant} onOpenSearch={() => setScreen('search')} onOpenNotifications={() => setScreen('notifications')} onOpenProfile={() => setScreen('profile')}>
     {renderWorkspaceView()}
     {createOpen && <QuickCreateFlow initialIdea={initialIdea} onClose={() => setCreateOpen(false)} onClarify={requestClarifications} onGenerate={generateBlueprint} onCreate={async (settings, option) => { const response = await createProject(settings, option); setProject(response.project || null); setProjects(usableProjects(response.projects)); setInitialIdea(settings.premise || ''); setCreateOpen(false) }} />}
-    {['search', 'notifications', 'profile'].includes(screen) && <UtilityDialog title={panelTitle[screen]} onClose={() => setScreen('home')} project={project} />}
+    {['search', 'notifications', 'profile'].includes(screen) && <UtilityDialog title={panelTitle[screen]} onClose={() => setScreen('home')} project={project} sessionUser={sessionUser} onSignOut={handleSignOut} authBusy={authBusy} />}
   </AppShell>
 }
 
@@ -171,9 +270,9 @@ function WorkspaceView({ view, project, projects, onOpenCreator, onOpenWritingRo
   return <section className="nf-utility-page"><div className="nf-utility-heading"><div className="nf-ai-orb"><Icon size={20} /></div><div><h1>{data.title}</h1><p>{data.intro}</p></div></div>{!project && <div className="nf-data-notice"><span>还没有当前作品，先创建一个故事即可使用这里的功能。</span><button type="button" onClick={onOpenCreator}>新建故事</button></div>}{data.blocks && <div className="nf-utility-stats">{data.blocks.map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</div>}{data.list && <div className="nf-utility-list">{data.list.length ? data.list.map((item, index) => <article key={`${item}-${index}`}><Icon size={15} /><span>{item}</span></article>) : <p>当前还没有记录。</p>}</div>}{project && <button type="button" className="nf-primary-button" onClick={onOpenWritingRoom}>进入写作房间</button>}</section>
 }
 
-function UtilityDialog({ title, onClose, project }) {
+function UtilityDialog({ title, onClose, project, sessionUser, onSignOut, authBusy }) {
   const Icon = title === '搜索作品' ? Search : title === '通知中心' ? Bell : Bot
-  return <div className="nf-utility-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="nf-utility-dialog" role="dialog" aria-modal="true" aria-labelledby="utility-title"><header><div><Icon size={18} /><h2 id="utility-title">{title}</h2></div><button type="button" title="关闭" onClick={onClose}><X size={17} /></button></header>{title === '搜索作品' ? <><input autoFocus placeholder="搜索作品名称或题材" /><p>{project ? `当前作品：${project.title}` : '还没有作品可搜索。'}</p></> : title === '通知中心' ? <p>目前没有新的通知。</p> : <p>当前账户：墨染流年<br />本地作品与设置保存在当前设备。</p>}</section></div>
+  return <div className="nf-utility-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="nf-utility-dialog" role="dialog" aria-modal="true" aria-labelledby="utility-title"><header><div><Icon size={18} /><h2 id="utility-title">{title}</h2></div><button type="button" title="关闭" onClick={onClose}><X size={17} /></button></header>{title === '搜索作品' ? <><input autoFocus placeholder="搜索作品名称或题材" /><p>{project ? `当前作品：${project.title}` : '还没有作品可搜索。'}</p></> : title === '通知中心' ? <p>目前没有新的通知。</p> : <div className="nf-account-panel"><p><strong>{sessionUser?.email || '当前已登录'}</strong><br />用户数据、作品和模型都将按这个账号隔离。</p><button type="button" className="nf-danger-button" onClick={onSignOut} disabled={authBusy}>{authBusy ? <LoaderCircle size={14} /> : '退出登录'}</button></div>}</section></div>
 }
 
 export default App

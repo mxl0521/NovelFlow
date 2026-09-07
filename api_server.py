@@ -257,6 +257,94 @@ def origin_allowed(origin: str, host_header: str = "") -> bool:
     parsed = urlparse(origin)
     return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == host_header.split(":", 1)[0].lower()
 
+
+PUBLIC_GET_PATHS = {"/api/health", "/api/security", "/api/creative-options", "/api/session/config"}
+PUBLIC_POST_PATHS = {"/api/session/sign-in", "/api/session/sign-up", "/api/session/sign-out"}
+
+
+def auth_required() -> bool:
+    return novelflow_cloud.enabled() and novelflow_cloud.require_auth()
+
+
+def supabase_base_url() -> str:
+    return os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+
+
+def supabase_service_key() -> str:
+    return os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+
+def supabase_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
+    base = supabase_base_url()
+    key = supabase_service_key()
+    if not base or not key:
+        raise RuntimeError("Supabase is not configured")
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    extra_headers = kwargs.pop("headers", {}) or {}
+    if isinstance(extra_headers, dict):
+        headers.update({str(name): str(value) for name, value in extra_headers.items() if str(name).strip() and str(value).strip()})
+    response = httpx.request(method, f"{base}{path}", headers=headers, timeout=20, **kwargs)
+    response.raise_for_status()
+    return response
+
+
+def supabase_validate_access_token(access_token: str) -> dict[str, Any] | None:
+    token = access_token.strip()
+    if not token or not supabase_base_url() or not supabase_service_key():
+        return None
+    try:
+        response = supabase_request("GET", "/auth/v1/user", headers={"Authorization": f"Bearer {token}"})
+        user = response.json()
+        return user if isinstance(user, dict) else None
+    except Exception as exc:
+        logging.warning("supabase token validation failed: %s", type(exc).__name__)
+        return None
+
+
+def supabase_sign_in(email: str, password: str) -> dict[str, Any]:
+    response = supabase_request(
+        "POST",
+        "/auth/v1/token?grant_type=password",
+        json={"email": email, "password": password},
+    )
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def supabase_sign_up(email: str, password: str) -> dict[str, Any]:
+    response = supabase_request(
+        "POST",
+        "/auth/v1/signup",
+        json={"email": email, "password": password},
+    )
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def supabase_sign_out(access_token: str) -> None:
+    token = access_token.strip()
+    if not token or not supabase_base_url() or not supabase_service_key():
+        return
+    try:
+        supabase_request("POST", "/auth/v1/logout", headers={"Authorization": f"Bearer {token}"})
+    except Exception:
+        return
+
+
+def safe_session_user(user: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(user, dict):
+        return {}
+    return {
+        "id": str(user.get("id", "")),
+        "email": str(user.get("email", "")),
+        "role": str(user.get("role", "")),
+        "aud": str(user.get("aud", "")),
+        "appMetadata": user.get("app_metadata", {}) if isinstance(user.get("app_metadata", {}), dict) else {},
+        "userMetadata": user.get("user_metadata", {}) if isinstance(user.get("user_metadata", {}), dict) else {},
+        "createdAt": str(user.get("created_at", "")),
+        "lastSignInAt": str(user.get("last_sign_in_at", "")),
+    }
+
 WORKFLOW_STEPS = [(skill["id"], skill["label"]) for skill in CORE_AGENT_SKILLS]
 
 CHAPTER_TYPES = {"推进主线", "强化冲突", "人物关系", "反转揭密", "情绪爆点", "阶段收束"}
@@ -357,6 +445,8 @@ EVENT_BUS.subscribe("*", _record_project_event)
 
 
 def load_profiles() -> list[dict[str, Any]]:
+    if novelflow_cloud.enabled():
+        return []
     default = {
         "id": "default",
         "name": "默认模型",
@@ -402,6 +492,7 @@ KEYRING_SERVICE = "NovelFlow"
 PROJECT_STORE = Path(__file__).with_name("novelflow-project.json")
 PROJECTS_STORE = Path(__file__).with_name("novelflow-projects.json")
 project_lock = Lock()
+request_lock = Lock()
 
 DEFAULT_PROJECT = {
     "id": "",
@@ -423,6 +514,14 @@ DEFAULT_PROJECT = {
 
 
 def load_managed_profiles() -> list[dict[str, Any]]:
+    if novelflow_cloud.ready():
+        try:
+            return novelflow_cloud.load_model_profiles()
+        except Exception as exc:
+            logging.warning("cloud model profiles unavailable: %s", type(exc).__name__)
+            return []
+    if novelflow_cloud.enabled():
+        return []
     if not PROFILE_STORE.exists():
         return []
     try:
@@ -440,6 +539,15 @@ def load_managed_profiles() -> list[dict[str, Any]]:
 
 
 def save_managed_profiles(profiles: list[dict[str, Any]]) -> None:
+    if novelflow_cloud.ready():
+        try:
+            novelflow_cloud.save_model_profiles(profiles)
+            return
+        except Exception as exc:
+            logging.warning("cloud model profile save unavailable: %s", type(exc).__name__)
+            return
+    if novelflow_cloud.enabled():
+        return
     metadata = [{key: value for key, value in profile.items() if key != "api_key"} for profile in profiles]
     temporary = PROFILE_STORE.with_suffix(".tmp")
     temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -447,6 +555,8 @@ def save_managed_profiles(profiles: list[dict[str, Any]]) -> None:
 
 
 def load_project() -> dict[str, Any]:
+    if novelflow_cloud.enabled():
+        return json.loads(json.dumps(DEFAULT_PROJECT, ensure_ascii=False))
     if not PROJECT_STORE.exists():
         return json.loads(json.dumps(DEFAULT_PROJECT, ensure_ascii=False))
     try:
@@ -468,9 +578,10 @@ def load_project() -> dict[str, Any]:
 
 
 def save_project(project: dict[str, Any]) -> None:
-    temporary = PROJECT_STORE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(PROJECT_STORE)
+    if not novelflow_cloud.enabled():
+        temporary = PROJECT_STORE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(PROJECT_STORE)
     if "PROJECT_REGISTRY" in globals():
         project["updated_at"] = datetime.now(timezone.utc).isoformat()
         project_id = str(project.get("id", ""))
@@ -484,6 +595,8 @@ def save_project(project: dict[str, Any]) -> None:
 
 
 def load_project_registry() -> dict[str, Any]:
+    if novelflow_cloud.enabled():
+        return {"active_id": "", "projects": []}
     if PROJECTS_STORE.exists():
         try:
             registry = json.loads(PROJECTS_STORE.read_text(encoding="utf-8"))
@@ -508,9 +621,10 @@ def load_project_registry() -> dict[str, Any]:
 
 
 def save_project_registry() -> None:
-    temporary = PROJECTS_STORE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(PROJECT_REGISTRY, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(PROJECTS_STORE)
+    if not novelflow_cloud.enabled():
+        temporary = PROJECTS_STORE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(PROJECT_REGISTRY, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(PROJECTS_STORE)
     save_sqlite_registry(PROJECT_REGISTRY)
 
 
@@ -1814,9 +1928,108 @@ def consume_model_quota(client_id: str, profile_id: str, units: int = 1) -> bool
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = "NovelFlowLocal/1.0"
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.session_user: dict[str, Any] = {}
+        self.session_token: object | None = None
+        self.request_user_id = ""
+        super().__init__(*args, **kwargs)
+
     def log_message(self, _format: str, *_args: object) -> None:
         # Do not log prompts, response text, or authorization data.
         return
+
+    def _request_path(self) -> str:
+        return urlparse(self.path).path
+
+    def _is_public_request(self) -> bool:
+        path = self._request_path()
+        if self.command == "GET":
+            return path in PUBLIC_GET_PATHS
+        if self.command == "POST":
+            return path in PUBLIC_POST_PATHS
+        return False
+
+    def _load_session(self) -> tuple[bool, dict[str, Any]]:
+        if not auth_required():
+            return True, {}
+        if self._is_public_request():
+            return True, {}
+        token = self.headers.get("Authorization", "")
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if not token:
+            return False, {"error": "请先登录"}
+        user = supabase_validate_access_token(token)
+        if not user:
+            return False, {"error": "登录已失效，请重新登录"}
+        self.session_user = user
+        self.request_user_id = str(user.get("id", "")).strip()
+        return True, {}
+
+    def _user_loaded(self) -> object | None:
+        if not self.request_user_id:
+            return None
+        return novelflow_cloud.set_owner_id(self.request_user_id)
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        return {
+            "project_registry": json.loads(json.dumps(PROJECT_REGISTRY, ensure_ascii=False)),
+            "active_project_id": ACTIVE_PROJECT_ID,
+            "project": json.loads(json.dumps(PROJECT, ensure_ascii=False)),
+            "managed_profiles": json.loads(json.dumps(MANAGED_PROFILES, ensure_ascii=False)),
+            "profiles": json.loads(json.dumps(PROFILES, ensure_ascii=False)),
+            "profile_by_id": json.loads(json.dumps(PROFILE_BY_ID, ensure_ascii=False)),
+        }
+
+    def _restore_state(self, snapshot: dict[str, Any]) -> None:
+        global PROJECT_REGISTRY, ACTIVE_PROJECT_ID, PROJECT, MANAGED_PROFILES, PROFILES, PROFILE_BY_ID
+        PROJECT_REGISTRY = snapshot["project_registry"]
+        ACTIVE_PROJECT_ID = snapshot["active_project_id"]
+        PROJECT = snapshot["project"]
+        MANAGED_PROFILES = snapshot["managed_profiles"]
+        PROFILES = snapshot["profiles"]
+        PROFILE_BY_ID = snapshot["profile_by_id"]
+
+    def _load_request_state(self) -> None:
+        global PROJECT_REGISTRY, ACTIVE_PROJECT_ID, PROJECT, MANAGED_PROFILES
+        if novelflow_cloud.enabled():
+            PROJECT_REGISTRY = load_sqlite_registry({"active_id": "", "projects": []})
+        else:
+            PROJECT_REGISTRY = load_sqlite_registry(load_project_registry())
+        if not isinstance(PROJECT_REGISTRY, dict):
+            PROJECT_REGISTRY = {"active_id": "", "projects": []}
+        projects = PROJECT_REGISTRY.get("projects", [])
+        if not isinstance(projects, list):
+            projects = []
+            PROJECT_REGISTRY["projects"] = projects
+        for stored_project in projects:
+            if isinstance(stored_project, dict):
+                ensure_project_schema(stored_project)
+        ACTIVE_PROJECT_ID = str(PROJECT_REGISTRY.get("active_id", "")) if isinstance(PROJECT_REGISTRY, dict) else ""
+        PROJECT = next(
+            (
+                project
+                for project in projects
+                if isinstance(project, dict) and str(project.get("id", "")) == ACTIVE_PROJECT_ID
+            ),
+            json.loads(json.dumps(DEFAULT_PROJECT, ensure_ascii=False)),
+        )
+        MANAGED_PROFILES = load_managed_profiles()
+        refresh_profiles()
+
+    def _restore_user(self, token: object | None) -> None:
+        if token is not None:
+            novelflow_cloud.reset_owner_id(token)
+        self.request_user_id = ""
+
+    def _require_user(self) -> bool:
+        if self.request_user_id:
+            return True
+        self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "请先登录"})
+        return False
+
+    def _session_user_payload(self) -> dict[str, Any]:
+        return safe_session_user(self.session_user)
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json_bytes(payload)
@@ -1834,6 +2047,74 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _session_sign_in(self) -> None:
+        payload = self._read_payload()
+        if payload is None:
+            return
+        email = str(payload.get("email", "")).strip()
+        password = str(payload.get("password", ""))
+        if not email or not password:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "邮箱或密码不正确"})
+            return
+        try:
+            session = supabase_sign_in(email, password)
+        except Exception as exc:
+            logging.warning("supabase sign-in failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "登录失败，请检查邮箱、密码或 Supabase 配置"})
+            return
+        access_token = str(session.get("access_token", "")) if isinstance(session, dict) else ""
+        if not access_token:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "登录失败，请重试"})
+            return
+        user = supabase_validate_access_token(access_token)
+        self._send_json(HTTPStatus.OK, {
+            "ok": True,
+            "session": {
+                "accessToken": access_token,
+                "refreshToken": str(session.get("refresh_token", "")) if isinstance(session, dict) else "",
+                "tokenType": str(session.get("token_type", "bearer")) if isinstance(session, dict) else "bearer",
+                "expiresAt": str(session.get("expires_at", "")) if isinstance(session, dict) else "",
+            },
+            "user": safe_session_user(user if isinstance(user, dict) else None),
+        })
+
+    def _session_sign_up(self) -> None:
+        payload = self._read_payload()
+        if payload is None:
+            return
+        email = str(payload.get("email", "")).strip()
+        password = str(payload.get("password", ""))
+        if not email or not password:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "邮箱或密码不正确"})
+            return
+        try:
+            session = supabase_sign_up(email, password)
+        except Exception as exc:
+            logging.warning("supabase sign-up failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "注册失败，请检查邮箱格式或 Supabase 配置"})
+            return
+        access_token = str(session.get("access_token", "")) if isinstance(session, dict) else ""
+        user = session.get("user") if isinstance(session, dict) else None
+        self._send_json(HTTPStatus.OK, {
+            "ok": True,
+            "session": {
+                "accessToken": access_token,
+                "refreshToken": str(session.get("refresh_token", "")) if isinstance(session, dict) else "",
+                "tokenType": str(session.get("token_type", "bearer")) if isinstance(session, dict) else "bearer",
+                "expiresAt": str(session.get("expires_at", "")) if isinstance(session, dict) else "",
+            } if access_token else None,
+            "user": safe_session_user(user if isinstance(user, dict) else None),
+            "needsConfirmation": not bool(access_token),
+        })
+
+    def _session_sign_out(self) -> None:
+        token = self.headers.get("Authorization", "")
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if token:
+            supabase_sign_out(token)
+        self._send_json(HTTPStatus.OK, {"ok": True})
+
     def do_OPTIONS(self) -> None:
         origin = self.headers.get("Origin", "")
         if not origin_allowed(origin, self.headers.get("Host", "")):
@@ -1842,12 +2123,27 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Vary", "Origin")
         self.end_headers()
 
     def do_GET(self) -> None:
-        request_path = urlparse(self.path).path
+        with request_lock:
+            state = self._snapshot_state()
+            ok, error_payload = self._load_session()
+            if not ok:
+                self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
+                return
+            self._user_loaded()
+            self._load_request_state()
+            try:
+                self._handle_get()
+            finally:
+                self._restore_state(state)
+                self._restore_user(None)
+
+    def _handle_get(self) -> None:
+        request_path = self._request_path()
         if request_path == "/api/health":
             self._send_json(HTTPStatus.OK, {
                 "ok": True,
@@ -1855,6 +2151,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "storage": "supabase" if novelflow_cloud.ready() else "sqlite",
                 "supabaseConfigured": novelflow_cloud.enabled(),
                 "supabaseReady": novelflow_cloud.ready(),
+                "authRequired": auth_required(),
             })
             return
         if request_path == "/api/security":
@@ -1863,7 +2160,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "dailyModelCallLimit": DAILY_MODEL_CALL_LIMIT,
                 "credentialStorage": "Windows Credential Manager / server environment",
                 "corsOrigins": sorted(ALLOWED_ORIGINS),
+                "authRequired": auth_required(),
             })
+            return
+        if request_path == "/api/session/config":
+            self._send_json(HTTPStatus.OK, {
+                "authRequired": auth_required(),
+                "supabaseConfigured": novelflow_cloud.enabled(),
+                "supabaseUrl": supabase_base_url(),
+            })
+            return
+        if request_path == "/api/session/me":
+            if not self._require_user():
+                return
+            self._send_json(HTTPStatus.OK, {"user": self._session_user_payload()})
             return
         if request_path == "/api/models":
             self._send_json(HTTPStatus.OK, {
@@ -1915,9 +2225,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"chapterId": chapter_id, "messages": assistant_thread_history(chapter_id, ASSISTANT_HISTORY_LIMIT)})
             return
         if request_path == "/api/projects":
+            if auth_required() and not self._require_user():
+                return
             self._send_json(HTTPStatus.OK, {"projects": [project_metadata(project, ACTIVE_PROJECT_ID) for project in PROJECT_REGISTRY["projects"]]})
             return
         if request_path == "/api/projects/trash":
+            if auth_required() and not self._require_user():
+                return
             self._send_json(HTTPStatus.OK, {"projects": deleted_projects()})
             return
         self._serve_static(request_path)
@@ -1953,6 +2267,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
+        with request_lock:
+            state = self._snapshot_state()
+            ok, error_payload = self._load_session()
+            if not ok:
+                self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
+                return
+            self._user_loaded()
+            self._load_request_state()
+            try:
+                self._handle_post()
+            finally:
+                self._restore_state(state)
+                self._restore_user(None)
+
+    def _handle_post(self) -> None:
         origin = self.headers.get("Origin", "")
         if origin and not origin_allowed(origin, self.headers.get("Host", "")):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "不允许跨站访问本机代理"})
@@ -2056,6 +2385,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         if self.path == "/api/projects/restore":
             self._restore_project()
             return
+        if self.path == "/api/session/sign-in":
+            self._session_sign_in()
+            return
+        if self.path == "/api/session/sign-up":
+            self._session_sign_up()
+            return
+        if self.path == "/api/session/sign-out":
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        try:
+            if auth_required() and not self._require_user():
+                return
+            # fall through to existing handlers below
+        finally:
+            pass
         if self.path == "/api/projects/export":
             self._export_project()
             return
