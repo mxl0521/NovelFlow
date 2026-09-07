@@ -311,6 +311,31 @@ def supabase_sign_in(email: str, password: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def supabase_auth_error_message(exc: Exception, action: str) -> str:
+    """Return a useful, non-sensitive message for common Supabase Auth errors."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    detail = ""
+    if response is not None:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                detail = str(payload.get("msg") or payload.get("message") or payload.get("error_description") or "").lower()
+        except Exception:
+            pass
+    if "email not confirmed" in detail or "email_not_confirmed" in detail:
+        return "该邮箱尚未完成验证。请打开注册邮件中的确认链接后，再回来登录。"
+    if "invalid login credentials" in detail or "invalid credentials" in detail:
+        return "邮箱或密码不正确。请检查后重新输入。"
+    if "user already registered" in detail or "already been registered" in detail:
+        return "该邮箱已经注册，请直接登录；如尚未验证，请先完成邮件验证。"
+    if "password" in detail and ("weak" in detail or "least" in detail):
+        return "密码不符合要求，请使用至少 8 位的密码重新注册。"
+    if status:
+        return f"Supabase {action}服务暂时拒绝了请求（状态 {status}），请稍后重试。"
+    return f"{action}失败，请检查网络和 Supabase 配置后重试。"
+
+
 def supabase_sign_up(email: str, password: str) -> dict[str, Any]:
     response = supabase_request(
         "POST",
@@ -2060,7 +2085,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             session = supabase_sign_in(email, password)
         except Exception as exc:
             logging.warning("supabase sign-in failed: %s", type(exc).__name__)
-            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "登录失败，请检查邮箱、密码或 Supabase 配置"})
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": supabase_auth_error_message(exc, "登录")})
             return
         access_token = str(session.get("access_token", "")) if isinstance(session, dict) else ""
         if not access_token:
@@ -2091,7 +2116,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             session = supabase_sign_up(email, password)
         except Exception as exc:
             logging.warning("supabase sign-up failed: %s", type(exc).__name__)
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "注册失败，请检查邮箱格式或 Supabase 配置"})
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": supabase_auth_error_message(exc, "注册")})
             return
         access_token = str(session.get("access_token", "")) if isinstance(session, dict) else ""
         user = session.get("user") if isinstance(session, dict) else None
