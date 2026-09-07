@@ -2129,6 +2129,12 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         with request_lock:
+            # The login shell and its assets must load before an auth token exists.
+            # Keep authentication on API requests only; otherwise `/` returns the
+            # JSON auth error instead of the React login page.
+            if not self._request_path().startswith("/api/"):
+                self._serve_static(self._request_path())
+                return
             state = self._snapshot_state()
             ok, error_payload = self._load_session()
             if not ok:
