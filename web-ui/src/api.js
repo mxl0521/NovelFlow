@@ -69,8 +69,8 @@ export async function signIn(email, password) {
   if (payload.session && payload.session.accessToken) persistSession(payload.session)
   return payload
 }
-export async function signUp(email, password) {
-  const payload = await request('/api/session/sign-up', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email, password }) })
+export async function signUp(email, password, displayName) {
+  const payload = await request('/api/session/sign-up', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ email, password, displayName }) })
   if (payload.session && payload.session.accessToken) persistSession(payload.session)
   return payload
 }
@@ -81,6 +81,12 @@ export async function signOut() {
     persistSession(null)
   }
 }
+
+export const updateProfile = (displayName) => request('/api/session/profile', {
+  method: 'POST',
+  headers: JSON_HEADERS,
+  body: JSON.stringify({ displayName }),
+})
 
 export const fetchProject = () => request('/api/project')
 export async function fetchModels() {

@@ -336,10 +336,12 @@ def supabase_auth_error_message(exc: Exception, action: str) -> str:
     return f"{action}失败，请检查网络和 Supabase 配置后重试。"
 
 
-def supabase_sign_up(email: str, password: str, redirect_url: str = "") -> dict[str, Any]:
-    signup_payload: dict[str, str] = {"email": email, "password": password}
+def supabase_sign_up(email: str, password: str, redirect_url: str = "", display_name: str = "") -> dict[str, Any]:
+    signup_payload: dict[str, Any] = {"email": email, "password": password}
     if redirect_url:
         signup_payload["email_redirect_to"] = redirect_url
+    if display_name:
+        signup_payload["data"] = {"display_name": display_name}
     response = supabase_request(
         "POST",
         "/auth/v1/signup",
@@ -357,6 +359,20 @@ def supabase_sign_out(access_token: str) -> None:
         supabase_request("POST", "/auth/v1/logout", headers={"Authorization": f"Bearer {token}"})
     except Exception:
         return
+
+
+def supabase_update_user_profile(access_token: str, display_name: str) -> dict[str, Any]:
+    token = access_token.strip()
+    if not token:
+        raise RuntimeError("登录已失效，请重新登录")
+    response = supabase_request(
+        "PUT",
+        "/auth/v1/user",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"data": {"display_name": display_name}},
+    )
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
 
 
 def safe_session_user(user: dict[str, Any] | None) -> dict[str, Any]:
@@ -2120,11 +2136,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         email = str(payload.get("email", "")).strip()
         password = str(payload.get("password", ""))
+        display_name = str(payload.get("displayName", "")).strip()
         if not email or not password:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "邮箱或密码不正确"})
             return
+        if len(display_name) > 40:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "显示名称不能超过 40 个字符"})
+            return
+        if not display_name:
+            display_name = email.split("@", 1)[0].strip() or "创作者"
         try:
-            session = supabase_sign_up(email, password, self._email_confirmation_redirect())
+            session = supabase_sign_up(email, password, self._email_confirmation_redirect(), display_name)
         except Exception as exc:
             logging.warning("supabase sign-up failed: %s", type(exc).__name__)
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": supabase_auth_error_message(exc, "注册")})
@@ -2150,6 +2172,29 @@ class ApiHandler(BaseHTTPRequestHandler):
         if token:
             supabase_sign_out(token)
         self._send_json(HTTPStatus.OK, {"ok": True})
+
+    def _session_update_profile(self) -> None:
+        payload = self._read_payload()
+        if payload is None:
+            return
+        display_name = str(payload.get("displayName", "")).strip()
+        if not display_name:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "显示名称不能为空"})
+            return
+        if len(display_name) > 40:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "显示名称不能超过 40 个字符"})
+            return
+        token = self.headers.get("Authorization", "")
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        try:
+            user = supabase_update_user_profile(token, display_name)
+        except Exception as exc:
+            logging.warning("supabase profile update failed: %s", type(exc).__name__)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "保存显示名称失败，请稍后重试"})
+            return
+        self.session_user = user
+        self._send_json(HTTPStatus.OK, {"ok": True, "user": safe_session_user(user)})
 
     def do_OPTIONS(self) -> None:
         origin = self.headers.get("Origin", "")
@@ -2435,6 +2480,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/session/sign-out":
             self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if self.path == "/api/session/profile":
+            self._session_update_profile()
             return
         try:
             if auth_required() and not self._require_user():
