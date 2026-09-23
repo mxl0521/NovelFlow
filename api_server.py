@@ -8,6 +8,7 @@ the assistant request to the configured OpenAI-compatible endpoint.
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ import os
 import re
 import secrets
 import time
+import uuid
 import zipfile
 import httpx
 from difflib import SequenceMatcher
@@ -537,6 +539,9 @@ PROJECT_STORE = Path(__file__).with_name("novelflow-project.json")
 PROJECTS_STORE = Path(__file__).with_name("novelflow-projects.json")
 project_lock = Lock()
 request_lock = Lock()
+async_tasks_lock = Lock()
+async_tasks: dict[str, dict[str, Any]] = {}
+async_executor = ThreadPoolExecutor(max_workers=max(2, int(os.getenv("NOVELFLOW_TASK_WORKERS", "4"))))
 
 DEFAULT_PROJECT = {
     "id": "",
@@ -1969,6 +1974,118 @@ def consume_model_quota(client_id: str, profile_id: str, units: int = 1) -> bool
     return False
 
 
+class _AsyncTaskProxy:
+    """Small request facade used by model workers after the HTTP request ends."""
+
+    def __init__(self, parent: "ApiHandler", payload: dict[str, Any]):
+        self.client_address = parent.client_address
+        self.headers = parent.headers
+        self.path = parent.path
+        self.request_user_id = parent.request_user_id
+        self.session_user = parent.session_user
+        self._payload = payload
+        self.response_status: int | None = None
+        self.response_payload: dict[str, Any] | None = None
+
+    def _read_payload(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return self._payload
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        self.response_status = int(status)
+        self.response_payload = payload
+
+    def _clarify_project(self) -> None:
+        ApiHandler._clarify_project(self)
+
+    def _bootstrap_project(self) -> None:
+        ApiHandler._bootstrap_project(self)
+
+    def _test_model(self) -> None:
+        ApiHandler._test_model(self)
+
+    def _run_workflow(self) -> None:
+        ApiHandler._run_workflow(self)
+
+    def _continue_chapter(self) -> None:
+        ApiHandler._continue_chapter(self)
+
+    def _check_consistency(self) -> None:
+        ApiHandler._check_consistency(self)
+
+    def _generate_chapter_plans(self) -> None:
+        ApiHandler._generate_chapter_plans(self)
+
+    def _preview_chapter_memory(self) -> None:
+        ApiHandler._preview_chapter_memory(self)
+
+
+def _task_snapshot(task_id: str, user_id: str) -> dict[str, Any] | None:
+    with async_tasks_lock:
+        task = async_tasks.get(task_id)
+        if not task or task.get("userId") != user_id:
+            return None
+        return {key: value for key, value in task.items() if key not in {"userId", "result"} or key == "result"}
+
+
+def _run_async_model_task(task_id: str, parent: "ApiHandler", method_name: str, payload: dict[str, Any], user_id: str) -> None:
+    state = parent._snapshot_state()
+    owner_token = None
+    try:
+        with async_tasks_lock:
+            if task_id in async_tasks:
+                async_tasks[task_id]["status"] = "running"
+        with request_lock:
+            if user_id:
+                owner_token = novelflow_cloud.set_owner_id(user_id)
+            parent.request_user_id = user_id
+            parent._load_request_state()
+        proxy = _AsyncTaskProxy(parent, payload)
+        # Model I/O must stay outside request_lock so task polling remains responsive.
+        getattr(proxy, method_name)()
+        status = proxy.response_status or HTTPStatus.INTERNAL_SERVER_ERROR
+        result = proxy.response_payload or {"error": "后台任务没有返回结果"}
+        with async_tasks_lock:
+            task = async_tasks.get(task_id)
+            if task is not None:
+                task.update({
+                    "status": "completed" if int(status) < 400 else "failed",
+                    "httpStatus": int(status),
+                    "result": result,
+                    "finishedAt": datetime.now(timezone.utc).isoformat(),
+                })
+    except Exception as exc:
+        logging.error("async model task failed: %s", type(exc).__name__)
+        with async_tasks_lock:
+            task = async_tasks.get(task_id)
+            if task is not None:
+                task.update({
+                    "status": "failed",
+                    "httpStatus": 500,
+                    "result": {"error": "后台模型任务失败，请稍后重试"},
+                    "finishedAt": datetime.now(timezone.utc).isoformat(),
+                })
+    finally:
+        if owner_token is not None:
+            novelflow_cloud.reset_owner_id(owner_token)
+        with request_lock:
+            parent._restore_state(state)
+
+
+def submit_async_model_task(parent: "ApiHandler", method_name: str, payload: dict[str, Any]) -> str:
+    task_id = uuid.uuid4().hex
+    user_id = str(parent.request_user_id or "").strip()
+    with async_tasks_lock:
+        async_tasks[task_id] = {
+            "id": task_id,
+            "status": "queued",
+            "kind": method_name.removeprefix("_"),
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "userId": user_id,
+        }
+    async_executor.submit(_run_async_model_task, task_id, parent, method_name, dict(payload), user_id)
+    return task_id
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = "NovelFlowLocal/1.0"
 
@@ -2221,6 +2338,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not ok:
                 self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
                 return
+            if self._request_path().startswith("/api/ai-tasks/"):
+                self._get_async_task(self._request_path().rsplit("/", 1)[-1])
+                return
             self._user_loaded()
             self._load_request_state()
             try:
@@ -2231,6 +2351,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _handle_get(self) -> None:
         request_path = self._request_path()
+        if request_path.startswith("/api/ai-tasks/"):
+            self._get_async_task(request_path.rsplit("/", 1)[-1])
+            return
         if request_path == "/api/health":
             self._send_json(HTTPStatus.OK, {
                 "ok": True,
@@ -2368,6 +2491,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._restore_state(state)
                 self._restore_user(None)
 
+    def _queue_model_task(self, method_name: str) -> None:
+        payload = self._read_payload()
+        if payload is None:
+            return
+        task_id = submit_async_model_task(self, method_name, payload)
+        self._send_json(HTTPStatus.ACCEPTED, {"taskId": task_id, "status": "queued"})
+
+    def _get_async_task(self, task_id: str) -> None:
+        if not re.fullmatch(r"[a-f0-9]{32}", task_id):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "任务编号不正确"})
+            return
+        task = _task_snapshot(task_id, str(self.request_user_id or ""))
+        if task is None:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "未找到后台任务"})
+            return
+        self._send_json(HTTPStatus.OK, task)
+
     def _handle_post(self) -> None:
         origin = self.headers.get("Origin", "")
         if origin and not origin_allowed(origin, self.headers.get("Host", "")):
@@ -2380,10 +2520,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._remove_model()
             return
         if self.path == "/api/models/test":
-            self._test_model()
+            self._queue_model_task("_test_model")
             return
         if self.path == "/api/workflow/run":
-            self._run_workflow()
+            self._queue_model_task("_run_workflow")
             return
         if self.path == "/api/workflow/apply":
             self._apply_workflow()
@@ -2392,7 +2532,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._cancel_workflow()
             return
         if self.path == "/api/project/clarify":
-            self._clarify_project()
+            self._queue_model_task("_clarify_project")
             return
         if self.path == "/api/project/memory/search":
             self._search_memory()
@@ -2407,14 +2547,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._restore_chapter_version()
             return
         if self.path == "/api/project/consistency":
-            self._check_consistency()
+            self._queue_model_task("_check_consistency")
             return
         if self.path == "/api/chapter/continue":
-            self._continue_chapter()
+            self._queue_model_task("_continue_chapter")
             return
         if self.path == "/api/project/bootstrap":
-            self._bootstrap_project()
+            self._queue_model_task("_bootstrap_project")
             return
+
         if self.path == "/api/project/chapters/rename":
             self._rename_chapter()
             return
@@ -2431,13 +2572,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._create_chapter()
             return
         if self.path == "/api/project/chapters/plan/generate":
-            self._generate_chapter_plans()
+            self._queue_model_task("_generate_chapter_plans")
             return
         if self.path == "/api/project/chapters/plan":
             self._save_chapter_plan()
             return
         if self.path == "/api/project/chapters/memory-preview":
-            self._preview_chapter_memory()
+            self._queue_model_task("_preview_chapter_memory")
             return
         if self.path == "/api/project/dossier/refresh":
             self._refresh_story_dossier()

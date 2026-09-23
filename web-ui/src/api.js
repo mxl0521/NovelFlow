@@ -54,12 +54,46 @@ async function request(path, options = {}) {
   if (session && session.accessToken) headers.Authorization = 'Bearer ' + session.accessToken
   const response = await fetch(path, { ...options, headers })
   const payload = await response.json().catch(() => ({}))
+  if (response.status === 202 && payload.taskId) {
+    return pollAiTask(payload.taskId, session, options.signal)
+  }
   if (!response.ok) {
     const error = new Error(payload.error || '请求失败，请稍后重试')
     error.status = response.status
     throw error
   }
   return payload
+}
+
+async function pollAiTask(taskId, session, signal) {
+  const deadline = Date.now() + 180_000
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+    await new Promise((resolve, reject) => {
+      const timer = window.setTimeout(resolve, 900)
+      signal?.addEventListener('abort', () => { window.clearTimeout(timer); reject(new DOMException('The operation was aborted.', 'AbortError')) }, { once: true })
+    })
+    const headers = {}
+    if (session?.accessToken) headers.Authorization = 'Bearer ' + session.accessToken
+    const response = await fetch(`/api/ai-tasks/${encodeURIComponent(taskId)}`, { headers, signal })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const error = new Error(payload.error || '后台任务查询失败，请稍后重试')
+      error.status = response.status
+      throw error
+    }
+    if (payload.status === 'queued' || payload.status === 'running') continue
+    const result = payload.result || {}
+    if (payload.status !== 'completed' || Number(payload.httpStatus || 200) >= 400) {
+      const error = new Error(result.error || '后台模型任务失败，请稍后重试')
+      error.status = Number(payload.httpStatus || 502)
+      throw error
+    }
+    return result
+  }
+  const error = new Error('模型生成时间过长，请稍后重试')
+  error.status = 504
+  throw error
 }
 
 export const fetchSessionConfig = () => request('/api/session/config')
