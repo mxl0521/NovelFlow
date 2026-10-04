@@ -2477,6 +2477,25 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
+                async_paths = {
+            "/api/models/test": "_test_model",
+            "/api/workflow/run": "_run_workflow",
+            "/api/project/clarify": "_clarify_project",
+            "/api/project/consistency": "_check_consistency",
+            "/api/chapter/continue": "_continue_chapter",
+            "/api/project/bootstrap": "_bootstrap_project",
+            "/api/project/create": "_create_project",
+            "/api/project/chapters/plan/generate": "_generate_chapter_plans",
+            "/api/project/chapters/memory-preview": "_preview_chapter_memory",
+        }
+        method_name = async_paths.get(self._request_path())
+        if method_name:
+            ok, error_payload = self._load_session()
+            if not ok:
+                self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
+                return
+            self._queue_model_task(method_name)
+            return
         with request_lock:
             state = self._snapshot_state()
             ok, error_payload = self._load_session()
