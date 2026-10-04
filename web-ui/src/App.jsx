@@ -94,7 +94,12 @@ function App() {
     return () => { active = false }
   }, [])
 
-  const refreshProjects = useCallback(async () => {
+  const refreshProjects = useCallback(async (snapshot = null) => {
+    if (snapshot && Array.isArray(snapshot.projects)) {
+      setProject(snapshot.project || null)
+      setProjects(usableProjects(snapshot.projects))
+      return
+    }
     setLoading(true); setLoadError('')
     try {
       const [projectResponse, projectsResponse] = await Promise.all([fetchProject(), fetchProjects()])
