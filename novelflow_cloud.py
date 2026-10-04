@@ -128,38 +128,53 @@ def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
     return {"active_id": active_id, "projects": projects}
 
 
+def save_project(project: dict[str, Any]) -> None:
+    """Persist one project with a small number of cloud requests.
+
+    Saving the whole registry and posting every memory chunk separately made
+    ordinary actions such as deleting a project wait on hundreds of sequential
+    network calls. Keep the project write targeted and batch memory chunks.
+    """
+    if not ready() or not isinstance(project, dict) or not project.get("id"):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    project_id = str(project["id"])
+    payload = {
+        "id": project_id,
+        "owner_id": owner_id(),
+        "title": str(project.get("title", "未命名作品")),
+        "data": project,
+        "updated_at": str(project.get("updated_at") or now),
+        "deleted_at": None,
+    }
+    _request("POST", "novelflow_projects", params={"on_conflict": "id"}, json=payload)
+    _request("DELETE", "novelflow_memory_chunks", params={"project_id": f"eq.{project_id}", "owner_id": f"eq.{owner_id()}"})
+    rows: list[dict[str, Any]] = []
+    for chapter in project.get("chapters", []):
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = str(chapter.get("id", ""))
+        title = str(chapter.get("title", "未命名章节"))[:120]
+        for index, content in enumerate(_split_chapter_text(str(chapter.get("body", "")))):
+            rows.append({
+                "owner_id": owner_id(),
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "chunk_index": index,
+                "title": title,
+                "content": content,
+                "updated_at": now,
+            })
+    for start in range(0, len(rows), 100):
+        _request("POST", "novelflow_memory_chunks", json=rows[start:start + 100])
+
+
 def save_registry(registry: dict[str, Any]) -> None:
     if not ready():
         return
-    now = datetime.now(timezone.utc).isoformat()
     for project in registry.get("projects", []):
-        if not isinstance(project, dict) or not project.get("id"):
-            continue
-        payload = {
-            "id": str(project["id"]),
-            "owner_id": owner_id(),
-            "title": str(project.get("title", "未命名作品")),
-            "data": project,
-            "updated_at": str(project.get("updated_at") or now),
-            "deleted_at": None,
-        }
-        _request("POST", "novelflow_projects", params={"on_conflict": "id"}, json=payload)
-        _request("DELETE", "novelflow_memory_chunks", params={"project_id": f"eq.{payload['id']}", "owner_id": f"eq.{owner_id()}"})
-        for chapter in project.get("chapters", []):
-            if not isinstance(chapter, dict):
-                continue
-            chapter_id = str(chapter.get("id", ""))
-            title = str(chapter.get("title", "未命名章节"))[:120]
-            for index, content in enumerate(_split_chapter_text(str(chapter.get("body", "")))):
-                _request("POST", "novelflow_memory_chunks", json={
-                    "owner_id": owner_id(),
-                    "project_id": payload["id"],
-                    "chapter_id": chapter_id,
-                    "chunk_index": index,
-                    "title": title,
-                    "content": content,
-                    "updated_at": now,
-                })
+        if isinstance(project, dict) and project.get("id"):
+            save_project(project)
 
 
 def load_model_profiles() -> list[dict[str, Any]]:
