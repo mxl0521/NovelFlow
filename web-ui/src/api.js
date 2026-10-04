@@ -66,7 +66,7 @@ async function request(path, options = {}) {
 }
 
 async function pollAiTask(taskId, session, signal) {
-  const deadline = Date.now() + 180_000
+  const deadline = Date.now() + 600_000
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     await new Promise((resolve, reject) => {
