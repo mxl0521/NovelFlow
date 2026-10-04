@@ -2000,6 +2000,9 @@ class _AsyncTaskProxy:
     def _bootstrap_project(self) -> None:
         ApiHandler._bootstrap_project(self)
 
+    def _create_project(self) -> None:
+        ApiHandler._create_project(self)
+
     def _test_model(self) -> None:
         ApiHandler._test_model(self)
 
