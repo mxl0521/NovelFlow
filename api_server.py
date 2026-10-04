@@ -542,6 +542,7 @@ request_lock = Lock()
 async_tasks_lock = Lock()
 async_tasks: dict[str, dict[str, Any]] = {}
 async_executor = ThreadPoolExecutor(max_workers=max(2, int(os.getenv("NOVELFLOW_TASK_WORKERS", "4"))))
+ASYNC_TASK_RETENTION_SECONDS = 900
 
 DEFAULT_PROJECT = {
     "id": "",
@@ -640,6 +641,9 @@ def save_project(project: dict[str, Any]) -> None:
                 break
         else:
             PROJECT_REGISTRY["projects"].append(project)
+        if novelflow_cloud.ready():
+            novelflow_cloud.save_project(project)
+            return
         save_project_registry()
 
 
@@ -1842,9 +1846,11 @@ def expand_long_form_plan(kit: dict[str, Any], chapter_count: int) -> tuple[list
         volume = next((item for item in volumes if int(item["startChapter"]) <= index <= int(item["endChapter"])), volumes[-1])
         arc = next((item for item in arcs if int(item["startChapter"]) <= index <= int(item["endChapter"])), arcs[-1])
         default_goal = f"服务于“{arc['title']}”：{arc['nextBeat']}。本章必须产生可记录的状态变化。"
+        seed_title = str(seed.get("title", "")).strip()
+        phase_title = str(arc.get("title", "推进")).split(" · ")[-1].strip() or "推进"
         plan.append({
             "id": f"{index:02d}",
-            "title": str(seed.get("title") or f"第{index}章 · 待细化")[:100],
+            "title": (seed_title or f"第{index}章 · {phase_title}")[:100],
             "goal": str(seed.get("goal") or default_goal)[:600],
             "hook": str(seed.get("hook") or "以新的选择、危机或信息差推动下一章")[:500],
             "volumeId": volume["id"],
@@ -2024,10 +2030,20 @@ class _AsyncTaskProxy:
 
 def _task_snapshot(task_id: str, user_id: str) -> dict[str, Any] | None:
     with async_tasks_lock:
+        now = time.time()
+        for stale_id, stale_task in list(async_tasks.items()):
+            expires_at = float(stale_task.get("expiresAt", 0) or 0)
+            if expires_at and expires_at <= now:
+                async_tasks.pop(stale_id, None)
         task = async_tasks.get(task_id)
         if not task or task.get("userId") != user_id:
             return None
-        return {key: value for key, value in task.items() if key not in {"userId", "result"} or key == "result"}
+        snapshot = {key: value for key, value in task.items() if key not in {"userId", "expiresAt"}}
+        if task.get("status") in {"completed", "failed"}:
+            # The browser consumes the result once; retaining a full project
+            # snapshot for every task eventually exhausts a small Heroku dyno.
+            async_tasks.pop(task_id, None)
+        return snapshot
 
 
 def _run_async_model_task(task_id: str, parent: "ApiHandler", method_name: str, payload: dict[str, Any], user_id: str) -> None:
@@ -2055,9 +2071,10 @@ def _run_async_model_task(task_id: str, parent: "ApiHandler", method_name: str, 
                     "httpStatus": int(status),
                     "result": result,
                     "finishedAt": datetime.now(timezone.utc).isoformat(),
+                    "expiresAt": time.time() + ASYNC_TASK_RETENTION_SECONDS,
                 })
     except Exception as exc:
-        logging.error("async model task failed: %s", type(exc).__name__)
+        logging.exception("async model task failed: %s", type(exc).__name__)
         with async_tasks_lock:
             task = async_tasks.get(task_id)
             if task is not None:
@@ -2066,6 +2083,7 @@ def _run_async_model_task(task_id: str, parent: "ApiHandler", method_name: str, 
                     "httpStatus": 500,
                     "result": {"error": "后台模型任务失败，请稍后重试"},
                     "finishedAt": datetime.now(timezone.utc).isoformat(),
+                    "expiresAt": time.time() + ASYNC_TASK_RETENTION_SECONDS,
                 })
     finally:
         if owner_token is not None:
