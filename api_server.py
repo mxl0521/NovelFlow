@@ -2477,7 +2477,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
-                async_paths = {
+        async_paths = {
             "/api/models/test": "_test_model",
             "/api/workflow/run": "_run_workflow",
             "/api/project/clarify": "_clarify_project",
