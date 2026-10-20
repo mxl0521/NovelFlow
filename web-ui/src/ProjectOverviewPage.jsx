@@ -33,9 +33,11 @@ function ProjectOverviewPage({ project, onBack, onOpenWritingRoom, onProjectRefr
     if (syncing || !chapters.length) return
     setSyncing(true); setNotice('')
     try {
-      const response = await refreshStoryDossier(chapters.at(-1)?.id || '')
+      const lastWrittenChapter = chapters.filter((chapter) => String(chapter.body || '').trim()).at(-1)
+      if (!lastWrittenChapter) throw new Error('请先保存至少一章正文，再同步资料。')
+      const response = await refreshStoryDossier(lastWrittenChapter.id)
       onProjectRefresh?.({ ...project, memory: response.memory || { ...memory, story_dossier: response.dossier } })
-      setNotice(`已根据第 ${response.dossier?.updatedThroughChapter || chapters.at(-1)?.id || ''} 章正文更新资料。`)
+      setNotice(`已根据第 ${response.dossier?.updatedThroughChapter || lastWrittenChapter.id} 章正文更新资料。`)
     } catch (error) { setNotice(error.message || '资料同步失败，正文不受影响。') } finally { setSyncing(false) }
   }
 

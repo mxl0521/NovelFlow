@@ -48,6 +48,32 @@ function withActiveModel(payload = {}) {
   return { ...payload, profileId }
 }
 
+function httpError(response, payload, fallback) {
+  const defaults = {
+    401: '登录已失效，请重新登录',
+    503: '服务器暂时不可用（HTTP 503），可能是请求超时或服务重启，请稍后重试',
+    504: '服务器请求超时（HTTP 504），请稍后重试',
+  }
+  const error = new Error(payload.error || defaults[response.status] || `${fallback}（HTTP ${response.status}）`)
+  error.status = response.status
+  return error
+}
+
+function pollingDelay(signal) {
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      window.clearTimeout(timer)
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', aborted)
+      resolve()
+    }, 900)
+    signal?.addEventListener('abort', aborted, { once: true })
+    if (signal?.aborted) aborted()
+  })
+}
+
 async function request(path, options = {}) {
   const session = storedSession()
   const headers = { ...(options.headers || {}) }
@@ -58,30 +84,36 @@ async function request(path, options = {}) {
     return pollAiTask(payload.taskId, session, options.signal)
   }
   if (!response.ok) {
-    const error = new Error(payload.error || '请求失败，请稍后重试')
-    error.status = response.status
-    throw error
+    throw httpError(response, payload, '请求失败，请稍后重试')
   }
   return payload
 }
 
 async function pollAiTask(taskId, session, signal) {
+  // Model generations can legitimately take several minutes. The initial
+  // request is asynchronous (202), so polling does not hold an Heroku HTTP
+  // request open and avoids the router's 30-second H12 limit.
   const deadline = Date.now() + 600_000
+  let transientFailures = 0
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
-    await new Promise((resolve, reject) => {
-      const timer = window.setTimeout(resolve, 900)
-      signal?.addEventListener('abort', () => { window.clearTimeout(timer); reject(new DOMException('The operation was aborted.', 'AbortError')) }, { once: true })
-    })
+    await pollingDelay(signal)
     const headers = {}
     if (session?.accessToken) headers.Authorization = 'Bearer ' + session.accessToken
-    const response = await fetch(`/api/ai-tasks/${encodeURIComponent(taskId)}`, { headers, signal })
+    let response
+    try {
+      response = await fetch(`/api/ai-tasks/${encodeURIComponent(taskId)}`, { headers, signal })
+    } catch (error) {
+      if (error.name === 'AbortError' || ++transientFailures > 3) throw error
+      continue
+    }
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
-      const error = new Error(payload.error || '后台任务查询失败，请稍后重试')
-      error.status = response.status
-      throw error
+      if ([502, 503, 504].includes(response.status) && ++transientFailures <= 3) continue
+      if (response.status === 404) payload.error = '未找到后台任务，服务可能已重启，请刷新页面查看已保存结果'
+      throw httpError(response, payload, '后台任务查询失败，请稍后重试')
     }
+    transientFailures = 0
     if (payload.status === 'queued' || payload.status === 'running') continue
     const result = payload.result || {}
     if (payload.status !== 'completed' || Number(payload.httpStatus || 200) >= 400) {
@@ -91,7 +123,7 @@ async function pollAiTask(taskId, session, signal) {
     }
     return result
   }
-  const error = new Error('模型生成时间过长，请稍后重试')
+  const error = new Error('等待模型结果时间过长，后台可能仍在执行，请稍后刷新查看结果')
   error.status = 504
   throw error
 }
@@ -162,7 +194,13 @@ export const deleteChapter = (id) => request('/api/project/chapters/delete', { m
 export const fetchChapterTrash = () => request('/api/project/chapters/trash')
 export const restoreChapter = (trashId) => request('/api/project/chapters/restore', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ trashId }) })
 export const runChapterAction = (chapterId, operation, range, signal, instruction = '') => request('/api/chapter/continue', { method: 'POST', headers: JSON_HEADERS, signal, body: JSON.stringify(withActiveModel({ chapterId, operation, range, instruction })) })
-export const askAssistant = (message, history, chapterId, signal) => request('/api/assistant', { method: 'POST', headers: JSON_HEADERS, signal, body: JSON.stringify(withActiveModel({ message, history, chapterId })) })
+export function askAssistant(message, history, chapterId, signal) {
+  const recentHistory = (Array.isArray(history) ? history : [])
+    .filter((item) => ['user', 'assistant'].includes(item?.role) && !item.error && !item.status && typeof item.content === 'string' && item.content.trim())
+    .slice(-10)
+    .map(({ role, content }) => ({ role, content: content.trim().slice(0, 1200) }))
+  return request('/api/assistant', { method: 'POST', headers: JSON_HEADERS, signal, body: JSON.stringify(withActiveModel({ message, history: recentHistory, chapterId })) })
+}
 export const fetchAssistantHistory = (chapterId) => request(`/api/project/assistant/history?chapterId=${encodeURIComponent(chapterId)}`)
 export const previewAssistantActions = (chapterId, instruction, assistantReply, currentDraft, signal) => request('/api/assistant/action-preview', { method: 'POST', headers: JSON_HEADERS, signal, body: JSON.stringify(withActiveModel({ chapterId, instruction, assistantReply, currentDraft })) })
 export const checkConsistency = (chapterId, focus = 'all') => request('/api/project/consistency', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ chapterId, focus })) })
