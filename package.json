@@ -2,9 +2,9 @@
   "name": "novelflow",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "scripts": {
-    "heroku-postbuild": "npm --prefix web-ui ci --omit=optional && npm --prefix web-ui run build"
+    "heroku-postbuild": "npm --prefix web-ui ci --include=dev --include=optional && npm --prefix web-ui run build"
   }
 }

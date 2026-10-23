@@ -1,6 +1,7 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 const ACTIVE_MODEL_KEY = 'novelflow.activeModelId'
 const SESSION_KEY = 'novelflow.session'
+let activeProjectId = ''
 
 function storedActiveModelId() {
   try { return window.localStorage.getItem(ACTIVE_MODEL_KEY) || '' } catch { return '' }
@@ -16,6 +17,7 @@ function storedSession() {
 }
 
 function persistSession(session) {
+  activeProjectId = ''
   try {
     if (session && session.accessToken) window.localStorage.setItem(SESSION_KEY, JSON.stringify(session))
     else window.localStorage.removeItem(SESSION_KEY)
@@ -78,14 +80,19 @@ async function request(path, options = {}) {
   const session = storedSession()
   const headers = { ...(options.headers || {}) }
   if (session && session.accessToken) headers.Authorization = 'Bearer ' + session.accessToken
+  const projectOperation = /^\/api\/(project(?:\/|$)|chapter\/|assistant(?:\/|$)|workflow\/)/.test(path) && !['/api/project/create', '/api/project/bootstrap', '/api/project/clarify'].includes(path)
+  if (activeProjectId && projectOperation) headers['X-Project-Id'] = activeProjectId
   const response = await fetch(path, { ...options, headers })
   const payload = await response.json().catch(() => ({}))
   if (response.status === 202 && payload.taskId) {
-    return pollAiTask(payload.taskId, session, options.signal)
+    const result = await pollAiTask(payload.taskId, session, options.signal)
+    if (result.project?.id) activeProjectId = result.project.id
+    return result
   }
   if (!response.ok) {
     throw httpError(response, payload, '请求失败，请稍后重试')
   }
+  if (Object.hasOwn(payload, 'project')) activeProjectId = payload.project?.id || ''
   return payload
 }
 
@@ -93,7 +100,7 @@ async function pollAiTask(taskId, session, signal) {
   // Model generations can legitimately take several minutes. The initial
   // request is asynchronous (202), so polling does not hold an Heroku HTTP
   // request open and avoids the router's 30-second H12 limit.
-  const deadline = Date.now() + 600_000
+  const deadline = Date.now() + 1_200_000
   let transientFailures = 0
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
@@ -123,7 +130,7 @@ async function pollAiTask(taskId, session, signal) {
     }
     return result
   }
-  const error = new Error('等待模型结果时间过长，后台可能仍在执行，请稍后刷新查看结果')
+  const error = new Error(`等待后台任务结果已达上限，任务可能仍在执行。请刷新查看已保存结果，任务编号：${taskId}`)
   error.status = 504
   throw error
 }
@@ -187,7 +194,32 @@ export const generateBlueprint = (settings, feedback = '') => request('/api/proj
 export const createProject = (settings, blueprint) => request('/api/project/create', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ settings, blueprint })) })
 export const uploadProjectCover = (dataUrl) => request('/api/project/cover', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ dataUrl }) })
 export const saveChapter = (chapter) => request('/api/project/chapters/save', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id: chapter.id, body: chapter.body, summary: chapter.goal || '', baseRevision: chapter.revision }) })
-export const refreshStoryDossier = (chapterId = '') => request('/api/project/dossier/refresh', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ chapterId })) })
+export const refreshStoryDossier = (chapterId = '', projectId = activeProjectId) => request('/api/project/dossier/refresh', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(withActiveModel({ chapterId, projectId })) })
+
+const dossierSchedules = new Map()
+export function scheduleDossierRefresh(projectId, chapterId) {
+  const key = `${storedSession()?.accessToken || ''}:${projectId}`
+  const existing = dossierSchedules.get(key)
+  if (existing) {
+    existing.chapterId = chapterId
+    existing.again = true
+    return existing.promise
+  }
+  const entry = { chapterId, again: false }
+  entry.promise = (async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 800))
+    let result
+    do {
+      entry.again = false
+      // Do not run an old user's scheduled request after signing out/in.
+      if (key !== `${storedSession()?.accessToken || ''}:${projectId}`) throw new Error('登录会话已变化，请重新同步资料')
+      result = await refreshStoryDossier(entry.chapterId, projectId)
+    } while (entry.again)
+    return result
+  })().finally(() => dossierSchedules.delete(key))
+  dossierSchedules.set(key, entry)
+  return entry.promise
+}
 export const createChapter = (chapter) => request('/api/project/chapters/create', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(chapter) })
 export const renameChapter = (id, title) => request('/api/project/chapters/rename', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id, title }) })
 export const deleteChapter = (id) => request('/api/project/chapters/delete', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ id }) })

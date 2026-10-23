@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowUp, Bot, Download, FileCheck2, LoaderCircle, MessageCircleMore, PenLine, Pencil, Plus, RotateCcw, Save, Sparkles, Square, Trash2, WandSparkles, X } from 'lucide-react'
-import { askAssistant, createChapter, deleteChapter, exportProjectFile, exportProjectJson, fetchAssistantHistory, fetchChapterTrash, fetchProject, previewAssistantActions, refreshStoryDossier, renameChapter, restoreChapter, runChapterAction, saveChapter } from './api.js'
+import { askAssistant, createChapter, deleteChapter, exportProjectFile, exportProjectJson, fetchAssistantHistory, fetchChapterTrash, fetchProject, previewAssistantActions, scheduleDossierRefresh, renameChapter, restoreChapter, runChapterAction, saveChapter } from './api.js'
+import { mergeDossierResult, dossierPending } from './dossier.js'
 import WritingToolsPanel from './WritingToolsPanel.jsx'
 
 const seedMessages = [{ role: 'assistant', content: '我在这里陪你写。可以直接问我剧情、人物或文风；选中正文后，也可以让我就地改写。' }]
@@ -36,6 +37,8 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
   // snapshot so a late dossier/title response cannot restore stale chapters.
   const projectRef = useRef(project)
   projectRef.current = project
+  const mountedRef = useRef(false)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
 
   useEffect(() => {
     activeRequestRef.current?.abort()
@@ -87,7 +90,25 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
     }
     projectRef.current = nextProject
     onProjectRefresh(nextProject)
+    if (response.bodyChanged && nextProject.id) {
+      syncSavedDossier(nextProject, response.chapter.id)
+    }
     return response
+  }
+  function syncSavedDossier(savedProject, chapterId) {
+    setNotice('正文已保存，资料正在后台更新…')
+    scheduleDossierRefresh(savedProject.id, chapterId)
+      .then((response) => {
+        const latest = projectRef.current
+        if (!mountedRef.current || latest?.id !== savedProject.id) return
+        const updated = mergeDossierResult(latest, response)
+        projectRef.current = updated
+        onProjectRefresh(updated)
+        setNotice(dossierPending(updated) ? '正文已保存，新的修改仍待同步。' : `正文已保存，资料已同步至第 ${response.dossier?.updatedThroughChapter || chapterId} 章。`)
+      })
+      .catch((error) => {
+        if (mountedRef.current && projectRef.current?.id === savedProject.id) setNotice(`正文已保存；资料暂未同步：${error.message || '可从作品资料页重试'}`)
+      })
   }
   async function selectChapter(nextId) {
     if (!nextId || nextId === activeChapter?.id) return
@@ -168,22 +189,8 @@ function WritingRoom({ project, onBack, onProjectRefresh }) {
     if (!activeChapter) return
     setBusy('save'); setNotice('')
     try {
-      const response = await saveChapter({ ...activeChapter, body: draft })
-      const currentProject = projectRef.current || project
-      const currentChapters = Array.isArray(currentProject?.chapters) ? currentProject.chapters : []
-      const nextProject = { ...currentProject, chapters: currentChapters.map((chapter) => chapter.id === response.chapter.id ? { ...chapter, ...response.chapter } : chapter), memory: response.memory || currentProject.memory }
-      projectRef.current = nextProject
-      onProjectRefresh(nextProject)
-      setNotice('正文已保存，资料同步中…')
-      refreshStoryDossier(response.chapter.id)
-        .then((dossierResponse) => {
-          const latestProject = projectRef.current || nextProject
-          const dossierProject = { ...latestProject, memory: dossierResponse.memory || { ...latestProject.memory, story_dossier: dossierResponse.dossier } }
-          projectRef.current = dossierProject
-          onProjectRefresh(dossierProject)
-          setNotice(`正文已保存，资料已同步至第 ${dossierResponse.dossier?.updatedThroughChapter || response.chapter.id} 章。`)
-        })
-        .catch((syncError) => { setNotice(`正文已保存；资料暂未同步：${syncError.message || '请稍后从作品资料页重试'}`) })
+      const response = await persistDraft(activeChapter, draft)
+      if (!response.bodyChanged) setNotice('正文已保存，无需重复整理未变化的内容。')
     } catch (error) { setNotice(error.message || '保存失败，请重试') } finally { setBusy('') }
   }
   function downloadBytes(data, fileName, contentType) {

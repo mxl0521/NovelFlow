@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import agent_skills
@@ -58,6 +59,39 @@ class NovelFlowStorageTests(unittest.TestCase):
         finally:
             second.close()
             first.close()
+
+    def test_index_checkpoint_survives_reload_and_preserves_unchanged_chunks(self):
+        registry = {"active_id": self.project["id"], "projects": [self.project]}
+        storage.save_registry(registry)
+        loaded = storage.load_registry({"active_id": "", "projects": []})
+        saved = loaded["projects"][0]
+        self.assertIn("01", saved["_memory_index"])
+        saved["chapters"].append({"id": "02", "title": "新章", "body": "新增唯一银铃线索"})
+        saved["updated_at"] = "2026-08-09T00:00:00+00:00"
+        storage.save_registry(loaded)
+        connection = storage._connect()
+        try:
+            dates = {row["chapter_id"]: row["updated_at"] for row in connection.execute("SELECT chapter_id, updated_at FROM memory_chunks")}
+        finally:
+            connection.close()
+        self.assertEqual(dates["01"], "2026-08-08T00:00:00+00:00")
+        self.assertEqual(dates["02"], saved["updated_at"])
+        self.assertTrue(storage.search_memory_chunks(self.project["id"], "银铃线索"))
+
+    def test_imported_index_checkpoint_cannot_skip_building_local_chunks(self):
+        self.project["_memory_index"] = {"01": "copied-from-another-database"}
+        storage.save_registry({"active_id": self.project["id"], "projects": [self.project]})
+        self.assertTrue(storage.search_memory_chunks(self.project["id"], "玉佩暗纹证据"))
+
+    def test_cloud_storage_failure_is_not_reported_as_empty_or_success(self):
+        import novelflow_cloud
+        fallback = {"active_id": "", "projects": []}
+        with patch.object(novelflow_cloud, "ready", return_value=True), patch.object(novelflow_cloud, "load_registry", side_effect=TimeoutError()):
+            with self.assertRaises(storage.StorageError):
+                storage.load_registry(fallback)
+        with patch.object(novelflow_cloud, "ready", return_value=True), patch.object(novelflow_cloud, "save_registry", side_effect=TimeoutError()):
+            with self.assertRaises(storage.StorageError):
+                storage.save_registry(fallback)
 
 
 class NovelFlowAgentSkillTests(unittest.TestCase):

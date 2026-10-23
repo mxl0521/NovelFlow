@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import sqlite3
@@ -19,6 +20,19 @@ ROOT = Path(__file__).resolve().parent
 DATABASE_PATH = ROOT / "novelflow.db"
 BACKUP_DIR = ROOT / "backup" / "novelflow"
 SCHEMA_VERSION = 2
+
+
+class StorageError(RuntimeError):
+    """Persistence failed; callers must not display an empty library/success."""
+
+
+def _cloud_call(operation: str, callback: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return callback(*args, **kwargs)
+    except novelflow_cloud.CloudConflictError:
+        raise
+    except Exception as exc:
+        raise StorageError(f"云端{operation}失败，请稍后重试；当前页面内容请保留") from exc
 
 
 def _connect() -> sqlite3.Connection:
@@ -61,15 +75,10 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
-def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
+def load_registry(fallback: dict[str, Any], *, project_id: str = "") -> dict[str, Any]:
     """Load active projects, importing the existing JSON registry once."""
     if novelflow_cloud.ready():
-        try:
-            return novelflow_cloud.load_registry(fallback)
-        except Exception:
-            # When cloud persistence is enabled we prefer returning the caller's
-            # empty fallback rather than accidentally mixing in shared local data.
-            return fallback
+        return _cloud_call("读取作品", novelflow_cloud.load_registry, fallback, project_id=project_id)
     if novelflow_cloud.enabled():
         return fallback
     with closing(_connect()) as connection:
@@ -85,12 +94,10 @@ def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
         return {"active_id": active_id, "projects": projects} if projects else fallback
 
 
-def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | None = None) -> None:
+def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | None = None, *, previous_projects: dict[str, Any] | None = None) -> None:
     if connection is None and novelflow_cloud.ready():
-        try:
-            novelflow_cloud.save_registry(registry)
-        except Exception:
-            return
+        _cloud_call("保存作品", novelflow_cloud.save_registry, registry, previous_projects=previous_projects)
+        return
     if connection is None and novelflow_cloud.enabled():
         return
     owns_connection = connection is None
@@ -100,7 +107,11 @@ def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | Non
         for project in registry.get("projects", []):
             if not isinstance(project, dict) or not project.get("id"):
                 continue
+            if previous_projects is not None and previous_projects.get(str(project["id"])) == project:
+                continue
             updated = str(project.get("updated_at") or now)
+            # Persist the checkpoint in the same transaction as its chunks.
+            _index_project_memory(db, project, updated)
             db.execute(
                 """INSERT INTO projects(id, title, data_json, updated_at, deleted_at)
                    VALUES(?, ?, ?, ?, NULL)
@@ -108,7 +119,6 @@ def save_registry(registry: dict[str, Any], connection: sqlite3.Connection | Non
                    updated_at=excluded.updated_at, deleted_at=NULL""",
                 (str(project["id"]), str(project.get("title", "未命名作品")), json.dumps(project, ensure_ascii=False), updated),
             )
-            _index_project_memory(db, project, updated)
         db.execute("INSERT OR REPLACE INTO app_meta(key, value) VALUES('active_project_id', ?)", (str(registry.get("active_id", "")),))
         db.commit()
     finally:
@@ -144,6 +154,24 @@ def _index_project_memory(connection: sqlite3.Connection, project: dict[str, Any
     project_id = str(project.get("id", ""))
     if not project_id:
         return
+    stored = connection.execute("SELECT data_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    hashes = json.loads(stored["data_json"]).get("_memory_index") if stored else None
+    if isinstance(hashes, dict):
+        current = {str(c.get("id", "")): hashlib.sha256(json.dumps([c.get("title", ""), c.get("body", "")], ensure_ascii=False).encode()).hexdigest()
+                   for c in project.get("chapters", []) if isinstance(c, dict)}
+        changed = {key for key in set(hashes) | set(current) if hashes.get(key) != current.get(key)}
+        for chapter_id in changed:
+            connection.execute("DELETE FROM memory_chunks WHERE project_id=? AND chapter_id=?", (project_id, chapter_id))
+        for chapter in project.get("chapters", []):
+            if not isinstance(chapter, dict) or str(chapter.get("id", "")) not in changed:
+                continue
+            chapter_id = str(chapter.get("id", ""))
+            title = str(chapter.get("title", "未命名章节"))[:120]
+            for index, content in enumerate(_split_chapter_text(str(chapter.get("body", "")))):
+                connection.execute("INSERT INTO memory_chunks(project_id, chapter_id, chunk_index, title, content, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+                                   (project_id, chapter_id, index, title, content, updated_at))
+        project["_memory_index"] = current
+        return
     connection.execute("DELETE FROM memory_chunks WHERE project_id=?", (project_id,))
     for chapter in project.get("chapters", []):
         if not isinstance(chapter, dict):
@@ -155,6 +183,10 @@ def _index_project_memory(connection: sqlite3.Connection, project: dict[str, Any
                 "INSERT INTO memory_chunks(project_id, chapter_id, chunk_index, title, content, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
                 (project_id, chapter_id, index, title, content, updated_at),
             )
+    project["_memory_index"] = {
+        str(c.get("id", "")): hashlib.sha256(json.dumps([c.get("title", ""), c.get("body", "")], ensure_ascii=False).encode()).hexdigest()
+        for c in project.get("chapters", []) if isinstance(c, dict)
+    }
 
 
 def _ngrams(text: str) -> Counter[str]:
@@ -213,10 +245,8 @@ def search_memory_chunks(project_id: str, query: str, limit: int = 12) -> list[d
 
 def soft_delete_project(project_id: str) -> None:
     if novelflow_cloud.ready():
-        try:
-            novelflow_cloud.soft_delete_project(project_id)
-        except Exception:
-            return
+        _cloud_call("删除作品", novelflow_cloud.soft_delete_project, project_id)
+        return
     if novelflow_cloud.enabled():
         return
     with closing(_connect()) as connection:
@@ -226,10 +256,7 @@ def soft_delete_project(project_id: str) -> None:
 
 def deleted_projects() -> list[dict[str, Any]]:
     if novelflow_cloud.ready():
-        try:
-            return novelflow_cloud.deleted_projects()
-        except Exception:
-            return []
+        return _cloud_call("读取回收站", novelflow_cloud.deleted_projects)
     if novelflow_cloud.enabled():
         return []
     with closing(_connect()) as connection:
@@ -239,10 +266,7 @@ def deleted_projects() -> list[dict[str, Any]]:
 
 def restore_project(project_id: str) -> dict[str, Any] | None:
     if novelflow_cloud.ready():
-        try:
-            return novelflow_cloud.restore_project(project_id)
-        except Exception:
-            return None
+        return _cloud_call("恢复作品", novelflow_cloud.restore_project, project_id)
     if novelflow_cloud.enabled():
         return None
     with closing(_connect()) as connection:
@@ -256,10 +280,7 @@ def restore_project(project_id: str) -> dict[str, Any] | None:
 
 def export_project(project_id: str) -> dict[str, Any] | None:
     if novelflow_cloud.ready():
-        try:
-            return novelflow_cloud.export_project(project_id)
-        except Exception:
-            return None
+        return _cloud_call("导出作品", novelflow_cloud.export_project, project_id)
     if novelflow_cloud.enabled():
         return None
     with closing(_connect()) as connection:

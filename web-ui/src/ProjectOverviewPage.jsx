@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, CheckCircle2, GitBranch, ImagePlus, LoaderCircle, Map, RefreshCw, Sparkles, Users } from 'lucide-react'
 import { refreshStoryDossier, uploadProjectCover } from './api.js'
+import { writtenChapters, dossierPending, mergeDossierResult } from './dossier.js'
 
 function chapterWords(chapter) { return String(chapter?.body || '').replace(/\s/g, '').length }
 function sourceLabel(value) { return Array.isArray(value) ? value.filter(Boolean).join('、') : String(value || '').trim() }
@@ -14,6 +15,10 @@ function ProjectOverviewPage({ project, onBack, onOpenWritingRoom, onProjectRefr
   const [notice, setNotice] = useState('')
   const [coverBusy, setCoverBusy] = useState(false)
   const coverInputRef = useRef(null)
+  const projectRef = useRef(project)
+  projectRef.current = project
+  const mountedRef = useRef(false)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
   const memory = project?.memory || {}
   const kit = memory.project_kit || {}
   const dossier = memory.story_dossier || {}
@@ -26,17 +31,20 @@ function ProjectOverviewPage({ project, onBack, onOpenWritingRoom, onProjectRefr
   const initialRules = Array.isArray(kit.worldRules) ? kit.worldRules : []
   const synopsis = dossier.synopsis || kit.synopsis || '保存章节后，阿流会从正文整理作品简介。'
   const updatedThrough = dossier.updatedThroughChapter || memory.story_dossier_meta?.updatedThroughChapter || ''
-  const syncText = syncing ? '资料同步中…' : updatedThrough ? `资料已同步至第 ${Number(updatedThrough)} 章` : '资料尚未从正文同步'
+  const lastWritten = writtenChapters(project).at(-1)
+  const savedText = lastWritten ? `正文已保存至第 ${Number(lastWritten.id)} 章；` : ''
+  const syncText = savedText + (syncing ? '资料同步中…' : updatedThrough ? `资料最近同步至第 ${Number(updatedThrough)} 章${dossierPending(project) ? '，有修改待更新' : ''}` : '资料尚未从正文同步')
   const chapterSummary = useMemo(() => memory.chapter_summaries || {}, [memory.chapter_summaries])
 
   async function syncDossier() {
     if (syncing || !chapters.length) return
     setSyncing(true); setNotice('')
     try {
-      const lastWrittenChapter = chapters.filter((chapter) => String(chapter.body || '').trim()).at(-1)
+      const lastWrittenChapter = writtenChapters(project).at(-1)
       if (!lastWrittenChapter) throw new Error('请先保存至少一章正文，再同步资料。')
-      const response = await refreshStoryDossier(lastWrittenChapter.id)
-      onProjectRefresh?.({ ...project, memory: response.memory || { ...memory, story_dossier: response.dossier } })
+      const response = await refreshStoryDossier(lastWrittenChapter.id, project.id)
+      if (!mountedRef.current || projectRef.current?.id !== project.id) return
+      onProjectRefresh?.(mergeDossierResult(projectRef.current, response))
       setNotice(`已根据第 ${response.dossier?.updatedThroughChapter || lastWrittenChapter.id} 章正文更新资料。`)
     } catch (error) { setNotice(error.message || '资料同步失败，正文不受影响。') } finally { setSyncing(false) }
   }

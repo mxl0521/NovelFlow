@@ -8,6 +8,8 @@ the assistant request to the configured OpenAI-compatible endpoint.
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 import io
@@ -27,7 +29,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -44,7 +46,9 @@ from novelflow_storage import (
     save_registry as save_sqlite_registry,
     search_memory_chunks,
     soft_delete_project,
+    StorageError,
 )
+import novelflow_dossier
 from novelflow_secrets import delete_secret, get_secret, set_secret
 from novelflow_vector_memory import search_semantic_chunks
 import novelflow_cloud
@@ -104,6 +108,11 @@ MAX_BOOTSTRAP_CHARS = 10_000
 ASSISTANT_HISTORY_LIMIT = 60
 RATE_LIMIT = 10
 RATE_WINDOW_SECONDS = 60
+MODEL_TIMEOUT_SECONDS = max(30, min(600, float(os.getenv("NOVELFLOW_MODEL_TIMEOUT_SECONDS", "180"))))
+MODEL_HTTP_TIMEOUT = httpx.Timeout(MODEL_TIMEOUT_SECONDS, connect=10, write=20, pool=10)
+AUTH_CACHE_SECONDS = 15
+_auth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_auth_cache_lock = Lock()
 
 
 def _project_chapters(project: dict[str, Any]) -> list[dict[str, str]]:
@@ -319,10 +328,30 @@ def supabase_validate_access_token(access_token: str) -> dict[str, Any] | None:
     token = access_token.strip()
     if not token or not supabase_base_url() or not supabase_service_key():
         return None
+    cache_key = hashlib.sha256(token.encode()).hexdigest()
+    with _auth_cache_lock:
+        cached = _auth_cache.get(cache_key)
+        if cached and cached[0] > time.time():
+            return copy.deepcopy(cached[1])
     try:
         response = supabase_request("GET", "/auth/v1/user", headers={"Authorization": f"Bearer {token}"})
         user = response.json()
-        return user if isinstance(user, dict) else None
+        if not isinstance(user, dict) or not user.get("id"):
+            return None
+        expires = time.time() + AUTH_CACHE_SECONDS
+        try:
+            raw = token.split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+            expires = min(expires, float(claims.get("exp", expires)))
+        except (ValueError, IndexError, TypeError):
+            pass
+        with _auth_cache_lock:
+            for key in list(_auth_cache):
+                if _auth_cache[key][0] <= time.time():
+                    _auth_cache.pop(key, None)
+            if len(_auth_cache) < 4096:
+                _auth_cache[cache_key] = (expires, copy.deepcopy(user))
+        return user
     except Exception as exc:
         logging.warning("supabase token validation failed: %s", type(exc).__name__)
         return None
@@ -561,7 +590,30 @@ PROFILE_STORE = Path(__file__).with_name("novelflow-profiles.json")
 KEYRING_SERVICE = "NovelFlow"
 PROJECT_STORE = Path(__file__).with_name("novelflow-project.json")
 PROJECTS_STORE = Path(__file__).with_name("novelflow-projects.json")
-request_lock = RLock()
+class _OwnerLock:
+    """Serialize state mutations per signed-in user, not across all tenants."""
+
+    def __init__(self) -> None:
+        self._guard = Lock()
+        self._locks: dict[str, RLock] = {}
+        self._held = local()
+
+    def __enter__(self) -> "_OwnerLock":
+        owner = novelflow_cloud.owner_id() or "anonymous"
+        with self._guard:
+            lock = self._locks.setdefault(owner, RLock())
+        lock.acquire()
+        stack = getattr(self._held, "stack", [])
+        stack.append(lock)
+        self._held.stack = stack
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        stack = self._held.stack
+        stack.pop().release()
+
+
+request_lock = _OwnerLock()
 project_lock = request_lock
 async_tasks_lock = Lock()
 model_limits_lock = Lock()
@@ -593,7 +645,7 @@ def load_managed_profiles() -> list[dict[str, Any]]:
             return novelflow_cloud.load_model_profiles()
         except Exception as exc:
             logging.warning("cloud model profiles unavailable: %s", type(exc).__name__)
-            return []
+            raise StorageError("云端模型配置读取失败，请稍后重试") from exc
     if novelflow_cloud.enabled():
         return []
     if not PROFILE_STORE.exists():
@@ -619,7 +671,7 @@ def save_managed_profiles(profiles: list[dict[str, Any]]) -> None:
             return
         except Exception as exc:
             logging.warning("cloud model profile save unavailable: %s", type(exc).__name__)
-            return
+            raise StorageError("云端模型配置保存失败，请稍后重试") from exc
     if novelflow_cloud.enabled():
         return
     metadata = [{key: value for key, value in profile.items() if key != "api_key"} for profile in profiles]
@@ -665,19 +717,32 @@ def _registry_versions(registry: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _remember_storage_state() -> None:
+    current = _REQUEST_STATE.get()
+    if current is not None:
+        current.storage_projects = {str(p.get("id", "")): copy.deepcopy(p) for p in current.PROJECT_REGISTRY.get("projects", []) if isinstance(p, dict)}
+        current.storage_versions = _registry_versions(current.PROJECT_REGISTRY)
+        current.initial_active_id = current.ACTIVE_PROJECT_ID
+
+
 def _check_task_storage_version() -> None:
     current = _REQUEST_STATE.get()
     if current is None or not getattr(current, "is_model_task", False):
         return
-    fallback = {"active_id": "", "projects": []} if novelflow_cloud.enabled() else load_project_registry()
-    latest = load_sqlite_registry(fallback)
+    project_id = str(current.PROJECT.get("id", ""))
+    cloud = novelflow_cloud.enabled()
+    fallback = {"active_id": project_id, "projects": []} if cloud else load_project_registry()
+    latest = load_sqlite_registry(fallback, project_id=project_id if cloud else "")
     for project in latest.get("projects", []):
         if isinstance(project, dict):
             ensure_project_schema(project)
-    if _registry_versions(latest) != current.storage_versions:
+    if _registry_versions(latest).get(project_id) != current.storage_versions.get(project_id):
         current.storage_conflict = True
         raise TaskStateConflict(TASK_CONFLICT_MESSAGE)
-    if current.ACTIVE_PROJECT_ID == current.initial_active_id:
+    # Changes to another book must neither fail this task nor be overwritten.
+    current.PROJECT_REGISTRY["projects"] = [p for p in latest.get("projects", []) if str(p.get("id", "")) != project_id] + [current.PROJECT]
+    current.storage_projects = {str(p.get("id", "")): copy.deepcopy(p) for p in latest.get("projects", []) if isinstance(p, dict)}
+    if not cloud and current.ACTIVE_PROJECT_ID == current.initial_active_id:
         current.PROJECT_REGISTRY["active_id"] = latest.get("active_id", "")
 
 
@@ -741,11 +806,9 @@ def _save_project_registry() -> None:
         temporary = PROJECTS_STORE.with_suffix(".tmp")
         temporary.write_text(json.dumps(_state().PROJECT_REGISTRY, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(PROJECTS_STORE)
-    save_sqlite_registry(_state().PROJECT_REGISTRY)
     current = _REQUEST_STATE.get()
-    if current is not None and getattr(current, "is_model_task", False):
-        current.storage_versions = _registry_versions(current.PROJECT_REGISTRY)
-        current.initial_active_id = current.ACTIVE_PROJECT_ID
+    save_sqlite_registry(_state().PROJECT_REGISTRY, previous_projects=getattr(current, "storage_projects", None))
+    _remember_storage_state()
 
 
 def ensure_project_schema(project: dict[str, Any]) -> None:
@@ -1540,6 +1603,17 @@ class ProviderHTTPError(RuntimeError):
 
 
 def invoke_model(profile: dict[str, Any], system_prompt: str, user_prompt: str, max_tokens: int = 700) -> str:
+    started = time.monotonic()
+    try:
+        reply = _invoke_model(profile, system_prompt, user_prompt, max_tokens)
+    except Exception as exc:
+        logging.warning("model_call failed protocol=%s mode=%s elapsed=%.2fs error=%s status=%s", profile_protocol(profile), profile_api_mode(profile), time.monotonic() - started, type(exc).__name__, getattr(exc, "status_code", ""))
+        raise
+    logging.info("model_call completed protocol=%s mode=%s elapsed=%.2fs", profile_protocol(profile), profile_api_mode(profile), time.monotonic() - started)
+    return reply
+
+
+def _invoke_model(profile: dict[str, Any], system_prompt: str, user_prompt: str, max_tokens: int = 700) -> str:
     api_key = profile_api_key(profile)
     if not api_key:
         raise ValueError("profile_not_configured")
@@ -1561,7 +1635,7 @@ def invoke_model(profile: dict[str, Any], system_prompt: str, user_prompt: str, 
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             },
-            timeout=90,
+            timeout=MODEL_HTTP_TIMEOUT,
         )
         if response.status_code >= 400:
             raise ProviderHTTPError(response.status_code, response.text[:400])
@@ -1581,20 +1655,17 @@ def invoke_model(profile: dict[str, Any], system_prompt: str, user_prompt: str, 
             payload = {"model": profile["model"], "messages": [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}], "max_completion_tokens": max_tokens, "store": False}
             path = "/chat/completions"
         response = None
-        for attempt in range(4):
+        for attempt in range(2):
             try:
-                response = httpx.post(base_url + path, headers=headers, json=payload, timeout=90)
+                response = httpx.post(base_url + path, headers=headers, json=payload, timeout=MODEL_HTTP_TIMEOUT)
             except httpx.HTTPError as exc:
-                if attempt < 3:
-                    time.sleep(2.0 * (attempt + 1))
-                    continue
                 if isinstance(exc, httpx.TimeoutException):
                     raise APITimeoutError(request=exc.request) from exc
                 raise APIConnectionError(request=exc.request) from exc
-            if response.status_code < 500:
+            if response.status_code not in {502, 503, 504}:
                 break
-            if attempt < 3:
-                time.sleep(2.0 * (attempt + 1))
+            if attempt == 0:
+                time.sleep(1)
         assert response is not None
         if response.status_code >= 400:
             raise ProviderHTTPError(response.status_code, response.text[:400])
@@ -1607,7 +1678,7 @@ def invoke_model(profile: dict[str, Any], system_prompt: str, user_prompt: str, 
         if not reply:
             raise RuntimeError("empty_completion")
         return reply
-    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": 60, "max_retries": 0}
+    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": MODEL_HTTP_TIMEOUT, "max_retries": 0}
     if profile.get("base_url"):
         client_kwargs["base_url"] = profile["base_url"]
     headers = profile_headers(profile)
@@ -2138,7 +2209,7 @@ def _task_snapshot(task_id: str, user_id: str) -> dict[str, Any] | None:
 
 
 def _run_async_model_task(task_id: str, proxy: _AsyncTaskProxy, method_name: str, user_id: str) -> None:
-    state_token = _REQUEST_STATE.set(SimpleNamespace(is_model_task=True))
+    state_token = _REQUEST_STATE.set(SimpleNamespace(is_model_task=True, task_id=task_id))
     owner_token = novelflow_cloud.set_owner_id(user_id)
     try:
         with async_tasks_lock:
@@ -2146,20 +2217,26 @@ def _run_async_model_task(task_id: str, proxy: _AsyncTaskProxy, method_name: str
                 async_tasks[task_id]["status"] = "running"
         # Every worker has its own project/profile state, including after model
         # I/O resumes. Never publish that state to another request's globals.
-        with request_lock:
-            ApiHandler._load_request_state(proxy)
-        getattr(proxy, method_name)()
-        status = proxy.response_status or HTTPStatus.INTERNAL_SERVER_ERROR
-        result = proxy.response_payload or {"error": "后台任务没有返回结果"}
-        with async_tasks_lock:
-            task = async_tasks.get(task_id)
-            if task is not None:
+        for _attempt in range(4):
+            with request_lock:
+                ApiHandler._load_request_state(proxy)
+            proxy.response_status = None
+            proxy.response_payload = None
+            getattr(proxy, method_name)()
+            status = proxy.response_status or HTTPStatus.INTERNAL_SERVER_ERROR
+            result = proxy.response_payload or {"error": "后台任务没有返回结果"}
+            with async_tasks_lock:
+                task = async_tasks.get(task_id)
+                if task is None:
+                    return
+                if method_name == "_refresh_story_dossier" and task.pop("refreshRequested", False) and int(status) in {200, 409} and _attempt < 3:
+                    continue
                 task.update({
                     "status": "completed" if int(status) < 400 else "failed",
-                    "httpStatus": int(status),
-                    "result": result,
-                    "finishedAt": datetime.now(timezone.utc).isoformat(),
+                    "httpStatus": int(status), "result": result,
+                    "finishedAt": datetime.now(timezone.utc).isoformat(), "finishedTime": time.time(),
                 })
+                break
     except Exception as exc:
         logging.exception("async model task failed (method=%s)", method_name)
         with async_tasks_lock:
@@ -2167,9 +2244,10 @@ def _run_async_model_task(task_id: str, proxy: _AsyncTaskProxy, method_name: str
             if task is not None:
                 task.update({
                     "status": "failed",
-                    "httpStatus": 409 if isinstance(exc, TaskStateConflict) else 500,
-                    "result": {"error": TASK_CONFLICT_MESSAGE if isinstance(exc, TaskStateConflict) else "后台模型任务失败，请稍后重试"},
+                    "httpStatus": 409 if isinstance(exc, (TaskStateConflict, novelflow_cloud.CloudConflictError)) else 503 if isinstance(exc, StorageError) else 500,
+                    "result": {"error": str(exc) if isinstance(exc, (TaskStateConflict, StorageError, novelflow_cloud.CloudConflictError)) else "后台任务处理失败，请保留任务编号并检查服务器日志"},
                     "finishedAt": datetime.now(timezone.utc).isoformat(),
+                    "finishedTime": time.time(),
                 })
     finally:
         novelflow_cloud.reset_owner_id(owner_token)
@@ -2180,12 +2258,25 @@ def submit_async_model_task(parent: "ApiHandler", method_name: str, payload: dic
     task_id = uuid.uuid4().hex
     user_id = str(parent.request_user_id or "").strip()
     with async_tasks_lock:
+        for old_id, task in list(async_tasks.items()):
+            if task.get("finishedTime", float("inf")) < time.time() - 3600:
+                async_tasks.pop(old_id, None)
+        project_id = str(payload.get("projectId", ""))
+        pending = [task for task in async_tasks.values() if task.get("status") in {"queued", "running"}]
+        if method_name == "_refresh_story_dossier":
+            existing = next((t for t in pending if t.get("userId") == user_id and t.get("kind") == "refresh_story_dossier" and t.get("projectId", "") == project_id), None)
+            if existing:
+                existing["refreshRequested"] = True
+                return str(existing["id"])
+        if len(pending) >= 128 or sum(t.get("userId") == user_id for t in pending) >= 8:
+            raise ValueError("后台任务较多，请等待当前任务完成后再提交")
         async_tasks[task_id] = {
             "id": task_id,
             "status": "queued",
             "kind": method_name.removeprefix("_"),
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "userId": user_id,
+            "projectId": project_id,
         }
     proxy = _AsyncTaskProxy(parent, dict(payload))
     async_executor.submit(_run_async_model_task, task_id, proxy, method_name, user_id)
@@ -2257,8 +2348,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         _state().PROFILE_BY_ID = snapshot["profile_by_id"]
 
     def _load_request_state(self) -> None:
+        target_id = str(getattr(self, "_payload", {}).get("projectId", "") or self.headers.get("X-Project-Id", "")).strip()
         if novelflow_cloud.enabled():
-            _state().PROJECT_REGISTRY = load_sqlite_registry({"active_id": "", "projects": []})
+            _state().PROJECT_REGISTRY = load_sqlite_registry({"active_id": target_id, "projects": []}, project_id=target_id)
         else:
             _state().PROJECT_REGISTRY = load_sqlite_registry(load_project_registry())
         if not isinstance(_state().PROJECT_REGISTRY, dict):
@@ -2279,12 +2371,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             ),
             json.loads(json.dumps(DEFAULT_PROJECT, ensure_ascii=False)),
         )
-        _state().MANAGED_PROFILES = load_managed_profiles()
-        refresh_profiles()
-        current = _REQUEST_STATE.get()
-        if current is not None and getattr(current, "is_model_task", False):
-            current.storage_versions = _registry_versions(current.PROJECT_REGISTRY)
-            current.initial_active_id = current.ACTIVE_PROJECT_ID
+        needs_profiles = getattr(_state(), "is_model_task", False) or urlparse(self.path).path.startswith("/api/models")
+        if not hasattr(_state(), "PROFILE_BY_ID"):
+            _state().MANAGED_PROFILES = load_managed_profiles() if needs_profiles else []
+            refresh_profiles()
+        if target_id:
+            target = next((p for p in projects if str(p.get("id", "")) == target_id), None)
+            if target is None:
+                raise TaskStateConflict("未找到当前作品，请重新打开作品")
+            _state().ACTIVE_PROJECT_ID = target_id
+            _state().PROJECT = target
+            _state().PROJECT_REGISTRY["active_id"] = target_id
+        _remember_storage_state()
 
     def _restore_user(self, token: object | None) -> None:
         if token is not None:
@@ -2395,6 +2493,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         if token.lower().startswith("bearer "):
             token = token[7:].strip()
         if token:
+            with _auth_cache_lock:
+                _auth_cache.pop(hashlib.sha256(token.encode()).hexdigest(), None)
             supabase_sign_out(token)
         self._send_json(HTTPStatus.OK, {"ok": True})
 
@@ -2429,7 +2529,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Project-Id")
         self.send_header("Vary", "Origin")
         self.end_headers()
 
@@ -2447,22 +2547,32 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._get_async_task(request_path.rsplit("/", 1)[-1])
             return
-        with request_lock:
-            # The login shell and its assets must load before an auth token exists.
-            # Keep authentication on API requests only; otherwise `/` returns the
-            # JSON auth error instead of the React login page.
-            ok, error_payload = self._load_session()
-            if not ok:
-                self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
+        self._dispatch_with_state("_handle_get")
+
+    def _dispatch_with_state(self, method: str) -> None:
+        # Authenticate before taking a tenant lock. A slow database for Alice
+        # must not block Bob's validation or requests.
+        ok, error_payload = self._load_session()
+        if not ok:
+            self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
+            return
+        state_token = _REQUEST_STATE.set(SimpleNamespace())
+        owner_token = novelflow_cloud.set_owner_id(self.request_user_id)
+        try:
+            if self._is_public_request():
+                getattr(self, method)()
                 return
-            state_token = _REQUEST_STATE.set(SimpleNamespace())
-            owner_token = novelflow_cloud.set_owner_id(self.request_user_id)
-            try:
+            with request_lock:
                 self._load_request_state()
-                self._handle_get()
-            finally:
-                _REQUEST_STATE.reset(state_token)
-                self._restore_user(owner_token)
+                getattr(self, method)()
+        except StorageError as exc:
+            logging.warning("request storage failed path=%s error=%s", self._request_path(), type(exc).__name__)
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc), "code": "storage_unavailable"})
+        except (TaskStateConflict, novelflow_cloud.CloudConflictError) as exc:
+            self._send_json(HTTPStatus.CONFLICT, {"error": str(exc)})
+        finally:
+            _REQUEST_STATE.reset(state_token)
+            self._restore_user(owner_token)
 
     def _handle_get(self) -> None:
         request_path = self._request_path()
@@ -2472,7 +2582,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if request_path == "/api/health":
             self._send_json(HTTPStatus.OK, {
                 "ok": True,
-                "configured": any(profile_api_key(profile) for profile in _state().PROFILES),
+                "configured": any(profile_api_key(profile) for profile in PROFILES),
                 "storage": "supabase" if novelflow_cloud.ready() else "sqlite",
                 "supabaseConfigured": novelflow_cloud.enabled(),
                 "supabaseReady": novelflow_cloud.ready(),
@@ -2623,26 +2733,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._queue_model_task(method_name)
             return
-        with request_lock:
-            ok, error_payload = self._load_session()
-            if not ok:
-                self._send_json(HTTPStatus.UNAUTHORIZED, error_payload)
-                return
-            state_token = _REQUEST_STATE.set(SimpleNamespace())
-            owner_token = novelflow_cloud.set_owner_id(self.request_user_id)
-            try:
-                self._load_request_state()
-                self._handle_post()
-            finally:
-                _REQUEST_STATE.reset(state_token)
-                self._restore_user(owner_token)
+        self._dispatch_with_state("_handle_post")
 
     def _queue_model_task(self, method_name: str) -> None:
         limit = MAX_CHAPTER_BODY_BYTES if method_name in {"_assistant_action_preview", "_preview_chapter_memory"} else MAX_BODY_BYTES
         payload = self._read_payload(limit)
         if payload is None:
             return
-        task_id = submit_async_model_task(self, method_name, payload)
+        if self.headers.get("X-Project-Id") and method_name not in {"_test_model", "_clarify_project", "_bootstrap_project", "_create_project"}:
+            if not payload.get("projectId"):
+                payload["projectId"] = self.headers["X-Project-Id"]
+        try:
+            task_id = submit_async_model_task(self, method_name, payload)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc)})
+            return
         self._send_json(HTTPStatus.ACCEPTED, {"taskId": task_id, "status": "queued"})
 
     def _get_async_task(self, task_id: str) -> None:
@@ -3969,6 +4074,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if requested_revision != current_revision:
                     self._send_json(HTTPStatus.CONFLICT, {"error": "正文已有更新，请刷新版本后重试", "chapter": chapter})
                     return
+            body_changed = chapter.get("body", "") != body
+            old_summary = str(_state().PROJECT.get("memory", {}).get("chapter_summaries", {}).get(chapter_id, ""))
+            summary_changed = bool(summary.strip()) and summary.strip() != old_summary
+            if not finalize and not body_changed and not summary_changed and chapter.get("status", "草稿") == "草稿":
+                self._send_json(HTTPStatus.OK, {"ok": True, "changed": False, "bodyChanged": False, "chapter": chapter, "memory": _state().PROJECT.get("memory", {})})
+                return
             if chapter.get("body") != body or chapter.get("status") != ("已定稿" if finalize else "草稿"):
                 snapshot_chapter(chapter, "确认定稿" if finalize else "手动保存")
                 chapter["revision"] = current_revision + 1
@@ -3977,6 +4088,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             chapter["updated_at"] = datetime.now(timezone.utc).isoformat()
             if summary.strip():
                 _state().PROJECT.setdefault("memory", {}).setdefault("chapter_summaries", {})[chapter_id] = summary.strip()
+            if body_changed or summary_changed:
+                _state().PROJECT.setdefault("memory", {}).setdefault("story_dossier_meta", {})["pending"] = True
             if finalize:
                 memory = _state().PROJECT.setdefault("memory", {})
                 if normalized_patch.get("summary"):
@@ -3989,9 +4102,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 save_project(_state().PROJECT)
             except Exception as exc:
                 logging.error("project save failed: %s", type(exc).__name__)
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "项目保存失败"})
+                status = HTTPStatus.CONFLICT if isinstance(exc, novelflow_cloud.CloudConflictError) else HTTPStatus.SERVICE_UNAVAILABLE if isinstance(exc, StorageError) else HTTPStatus.INTERNAL_SERVER_ERROR
+                self._send_json(status, {"error": str(exc) if isinstance(exc, (StorageError, novelflow_cloud.CloudConflictError)) else "项目保存失败，请保留当前正文后重试"})
                 return
-        self._send_json(HTTPStatus.OK, {"ok": True, "chapter": chapter, "memory": _state().PROJECT.get("memory", {})})
+        self._send_json(HTTPStatus.OK, {"ok": True, "changed": True, "bodyChanged": body_changed or summary_changed, "chapter": chapter, "memory": _state().PROJECT.get("memory", {})})
 
     def _preview_chapter_memory(self) -> None:
         payload = self._read_payload(MAX_CHAPTER_BODY_BYTES)
@@ -4046,69 +4160,95 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "模型暂时无法整理长期记忆，请重试"})
 
     def _refresh_story_dossier(self) -> None:
-        if rate_limited(self.client_address[0]):
-            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "请求过于频繁，请稍后再试"})
-            return
         payload = self._read_payload()
         if payload is None:
             return
-        profile_id = str(payload.get("profileId", "")).strip()
-        profile = _state().PROFILE_BY_ID.get(profile_id)
+        project_id = str(_state().PROJECT.get("id", ""))
+        payload["projectId"] = project_id
+        plan = novelflow_dossier.plan(_state().PROJECT)
+        if not plan["chapters"] and not plan["unchanged"]:
+            self._send_json(HTTPStatus.CONFLICT, {"error": "当前作品还没有已保存的章节正文，暂时无法整理资料"})
+            return
+        if plan["unchanged"]:
+            self._send_json(HTTPStatus.OK, {"ok": True, "unchanged": True, "projectId": project_id,
+                "dossier": _state().PROJECT["memory"]["story_dossier"], "memory": _state().PROJECT["memory"]})
+            return
+        if rate_limited(self.client_address[0]):
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "请求过于频繁，请稍后再试"})
+            return
+        profile = _state().PROFILE_BY_ID.get(str(payload.get("profileId", "")).strip())
         if profile is None or not profile_api_key(profile):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "当前模型尚未配置密钥，请先在设置中配置模型"})
             return
-        chapters = [chapter for chapter in _project_chapters(_state().PROJECT) if str(chapter.get("body", "")).strip()]
-        if not chapters:
-            self._send_json(HTTPStatus.CONFLICT, {"error": "当前作品还没有已保存的章节正文，暂时无法整理资料"})
-            return
-        memory = _state().PROJECT.get("memory", {}) if isinstance(_state().PROJECT.get("memory"), dict) else {}
-        summaries = memory.get("chapter_summaries", {}) if isinstance(memory.get("chapter_summaries"), dict) else {}
-        source_chapters = []
-        for chapter in chapters[-20:]:
-            body = str(chapter.get("body", ""))
-            excerpt = body if len(body) <= 3_200 else body[:1_600] + "\n……\n" + body[-1_600:]
-            source_chapters.append({
-                "id": str(chapter.get("id", "")),
-                "title": str(chapter.get("title", "")),
-                "summary": str(summaries.get(str(chapter.get("id", "")), ""))[:1_000],
-                "bodyExcerpt": excerpt,
-            })
         prompt = (
-            "你是小说资料整理员。只输出合法 JSON，不要 Markdown，不要创造正文没有出现的人物或事实。"
-            "请根据已保存章节整理当前作品资料。初始设定只能作为背景参考，章节正文优先。"
-            "人物必须使用正文中出现的真实姓名，禁止返回‘主角’、‘关键对手’、‘关键人物1’等占位词。"
-            "伏笔状态只能使用：埋设、推进中、部分回收、已回收、待确认。"
+            "你是小说资料整理员。只输出合法 JSON，不要 Markdown，不要创造正文没有出现的事实。"
+            "previousDossier 是先前已确认的资料，本批 chapters 是按章节顺序提供的完整正文片段。"
+            "请合并并返回完整的精简资料，保留此前已确认且未被后文推翻的事实。正文优先于初始设定。"
+            "同一章可能分为多个 part，未收到的内容不能推测。人物用正文真实姓名，不用主角等占位词。"
             "格式：{\"synopsis\":\"\",\"currentState\":\"\",\"storyPhase\":\"\","
-            "\"updatedThroughChapter\":\"\",\"worldFacts\":[{\"title\":\"\",\"content\":\"\",\"sourceChapters\":\"\",\"status\":\"已确认\"}],"
+            "\"worldFacts\":[{\"title\":\"\",\"content\":\"\",\"sourceChapters\":\"\",\"status\":\"已确认\"}],"
             "\"characters\":[{\"name\":\"\",\"role\":\"\",\"state\":\"\",\"relationship\":\"\",\"lastChapter\":\"\"}],"
-            "\"foreshadows\":[{\"name\":\"\",\"status\":\"\",\"plantedChapter\":\"\",\"lastChapter\":\"\",\"note\":\"\"}]}。"
-            "最多整理 8 条世界事实、12 个人物、16 条伏笔。"
+            "\"foreshadows\":[{\"name\":\"\",\"status\":\"埋设/推进中/部分回收/已回收/待确认\",\"plantedChapter\":\"\",\"lastChapter\":\"\",\"note\":\"\"}]}。"
+            "最多 8 条世界事实、12 个人物、16 条伏笔。每项简明扼要。"
         )
-        kit = memory.get("project_kit", {}) if isinstance(memory.get("project_kit"), dict) else {}
-        source = {
-            "project": {"title": _state().PROJECT.get("title", ""), "genre": _state().PROJECT.get("genre", ""), "initialSynopsis": str(kit.get("synopsis", ""))[:2_000], "initialRules": kit.get("worldRules", [])[:8] if isinstance(kit.get("worldRules"), list) else []},
-            "chapters": source_chapters,
-        }
-        try:
-            raw = extract_json_object(invoke_model(profile, prompt, json.dumps(source, ensure_ascii=False), max_tokens=3_500))
-            dossier = normalize_story_dossier(raw)
-            dossier["updatedThroughChapter"] = str(chapters[-1].get("id", ""))
-        except Exception as exc:
-            logging.error("story dossier refresh failed: %s", type(exc).__name__)
-            message = "模型返回的作品资料格式不完整，请重试" if isinstance(exc, (ValueError, json.JSONDecodeError)) else provider_error_message(exc)
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": message})
-            return
-        with project_lock:
-            memory = _state().PROJECT.setdefault("memory", {})
-            memory["story_dossier"] = dossier
-            memory["story_dossier_meta"] = {"source": "saved_chapters", "updatedAt": datetime.now(timezone.utc).isoformat(), "updatedThroughChapter": dossier.get("updatedThroughChapter", ""), "sourceChapterIds": [item["id"] for item in source_chapters]}
+        deadline = time.monotonic() + 1100
+        changed_attempts = 0
+        while time.monotonic() < deadline:
+            plan = novelflow_dossier.plan(_state().PROJECT)
+            if plan["unchanged"]:
+                break
+            memory = _state().PROJECT.get("memory", {})
+            kit = memory.get("project_kit", {})
+            source = {"project": {"title": _state().PROJECT.get("title", ""), "genre": _state().PROJECT.get("genre", ""),
+                       "initialSynopsis": str(kit.get("synopsis", ""))[:2000], "initialRules": kit.get("worldRules", [])[:8]},
+                      "previousDossier": plan["previousDossier"], "chapters": plan["chapters"]}
             try:
-                save_project(_state().PROJECT)
+                if consume_model_quota(self.client_address[0], profile["id"]):
+                    self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "今日模型调用额度已用完，已完成的资料进度已保存"})
+                    return
+                raw = extract_json_object(invoke_model(profile, prompt, json.dumps(source, ensure_ascii=False), max_tokens=2500))
+                if not isinstance(raw, dict) or not any(raw.get(k) for k in ("synopsis", "currentState", "worldFacts", "characters", "foreshadows")):
+                    raise ValueError("empty_dossier")
+                dossier = normalize_story_dossier({**plan["previousDossier"], **raw})
+                dossier["updatedThroughChapter"] = plan["updatedThroughChapter"]
             except Exception as exc:
-                logging.error("story dossier save failed: %s", type(exc).__name__)
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "作品资料保存失败"})
+                logging.warning("story dossier generation failed error=%s", type(exc).__name__)
+                message = "模型返回的作品资料格式不完整，请重试" if isinstance(exc, (ValueError, json.JSONDecodeError)) else provider_error_message(exc)
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": message + "；已完成的资料进度已保留，可重试接着更新", "projectId": project_id})
                 return
-        self._send_json(HTTPStatus.OK, {"ok": True, "dossier": dossier, "memory": _state().PROJECT.get("memory", {})})
+            with project_lock:
+                # Reload before committing, merge only dossier fields, and use
+                # the cloud snapshot version when saving. New prose survives.
+                ApiHandler._load_request_state(self)
+                if str(_state().PROJECT.get("id", "")) != project_id:
+                    self._send_json(HTTPStatus.CONFLICT, {"error": "当前作品已切换，请重新打开原作品更新资料"})
+                    return
+                if novelflow_dossier.source_fingerprint(_state().PROJECT) != plan["sourceFingerprint"]:
+                    changed_attempts += 1
+                    if changed_attempts >= 3:
+                        self._send_json(HTTPStatus.CONFLICT, {"error": "正文仍在更新，请保存完成后再次同步资料；未覆盖新正文"})
+                        return
+                    continue
+                meta = {"source": "saved_chapters", "schemaVersion": novelflow_dossier.SCHEMA_VERSION,
+                        "updatedAt": datetime.now(timezone.utc).isoformat(),
+                        "updatedThroughChapter": plan["updatedThroughChapter"], "sourceChapterIds": plan["sourceChapterIds"],
+                        "processedSegments": plan["processedSegments"], "pending": plan["pending"],
+                        "chapterRevisions": {str(c.get("id", "")): int(c.get("revision", 0)) for c in novelflow_dossier.written_chapters(_state().PROJECT) if str(c.get("id", "")) in plan["sourceChapterIds"]},
+                        "totalSegments": plan["totalSegments"]}
+                memory = _state().PROJECT.setdefault("memory", {})
+                memory["story_dossier"] = dossier
+                memory["story_dossier_meta"] = meta
+                _save_project(_state().PROJECT)
+                task_id = getattr(_state(), "task_id", "")
+                with async_tasks_lock:
+                    if task_id in async_tasks:
+                        async_tasks[task_id]["progress"] = {"updatedThroughChapter": plan["updatedThroughChapter"],
+                            "processed": len(plan["processedSegments"]), "total": plan["totalSegments"]}
+        else:
+            self._send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "本次资料同步已达到等待上限，已完成的进度已保存，请再次同步继续"})
+            return
+        self._send_json(HTTPStatus.OK, {"ok": True, "projectId": project_id,
+            "dossier": _state().PROJECT["memory"]["story_dossier"], "memory": _state().PROJECT["memory"]})
 
     def _create_chapter(self) -> None:
         if rate_limited(self.client_address[0]):

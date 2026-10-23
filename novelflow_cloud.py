@@ -11,6 +11,7 @@ import math
 import os
 import re
 import json
+import hashlib
 from datetime import datetime, timezone
 from contextvars import ContextVar
 from typing import Any
@@ -20,6 +21,10 @@ import httpx
 from novelflow_secrets import open_secret, seal_secret
 
 _OWNER_ID: ContextVar[str] = ContextVar("novelflow_owner_id", default="")
+
+
+class CloudConflictError(RuntimeError):
+    """The cloud snapshot changed since it was read."""
 
 
 def enabled() -> bool:
@@ -64,7 +69,7 @@ def _request(method: str, table: str, **kwargs: Any) -> httpx.Response:
         "Content-Type": "application/json",
         "Prefer": "return=representation,resolution=merge-duplicates",
     }
-    response = httpx.request(method, f"{base}/rest/v1/{table}", headers=headers, timeout=20, **kwargs)
+    response = httpx.request(method, f"{base}/rest/v1/{table}", headers=headers, timeout=httpx.Timeout(12, connect=5), **kwargs)
     response.raise_for_status()
     return response
 
@@ -110,15 +115,18 @@ def _cosine(left: dict[str, int], right: dict[str, int]) -> float:
     return dot / (norm_left * norm_right) if norm_left and norm_right else 0.0
 
 
-def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
+def load_registry(fallback: dict[str, Any], *, project_id: str = "") -> dict[str, Any]:
     if not ready():
         return fallback
-    rows = _request("GET", "novelflow_projects", params={
+    params = {
         "owner_id": f"eq.{owner_id()}",
         "deleted_at": "is.null",
         "select": "id,data,updated_at",
         "order": "updated_at.desc",
-    }).json()
+    }
+    if project_id:
+        params["id"] = f"eq.{project_id}"
+    rows = _request("GET", "novelflow_projects", params=params).json()
     projects = [row.get("data") for row in rows if isinstance(row, dict) and isinstance(row.get("data"), dict)]
     if not projects:
         return fallback
@@ -128,7 +136,7 @@ def load_registry(fallback: dict[str, Any]) -> dict[str, Any]:
     return {"active_id": active_id, "projects": projects}
 
 
-def save_project(project: dict[str, Any]) -> None:
+def save_project(project: dict[str, Any], previous_project: dict[str, Any] | None = None) -> None:
     """Persist one project with a small number of cloud requests.
 
     Saving the whole registry and posting every memory chunk separately made
@@ -147,11 +155,39 @@ def save_project(project: dict[str, Any]) -> None:
         "updated_at": str(project.get("updated_at") or now),
         "deleted_at": None,
     }
-    _request("POST", "novelflow_projects", params={"on_conflict": "id"}, json=payload)
-    _request("DELETE", "novelflow_memory_chunks", params={"project_id": f"eq.{project_id}", "owner_id": f"eq.{owner_id()}"})
+    def write_snapshot(data: dict[str, Any], expected: str = "") -> None:
+        snapshot = {**payload, "data": data}
+        if expected:
+            response = _request("PATCH", "novelflow_projects", params={
+                "id": f"eq.{project_id}", "owner_id": f"eq.{owner_id()}", "updated_at": f"eq.{expected}",
+                "deleted_at": "is.null",
+            }, json=snapshot)
+            if not response.json():
+                raise CloudConflictError("作品已被其他请求修改，请刷新后重试")
+        else:
+            _request("POST", "novelflow_projects", params={"on_conflict": "id"}, json=snapshot)
+
+    chapters = {str(c.get("id", "")): c for c in project.get("chapters", []) if isinstance(c, dict)}
+    hashes = {key: hashlib.sha256(json.dumps([c.get("title", ""), c.get("body", "")], ensure_ascii=False).encode()).hexdigest()
+              for key, c in chapters.items()}
+    # Store the previous index checkpoint first. If an index request fails, a
+    # subsequent save can repair it instead of assuming the index is current.
+    old_hashes = (previous_project or {}).get("_memory_index", {})
+    if not isinstance(old_hashes, dict):
+        old_hashes = {}
+    pending_project = {**project, "_memory_index": old_hashes}
+    expected = str((previous_project or {}).get("updated_at") or "")
+    write_snapshot(pending_project, expected)
+    changed_ids = {key for key in set(old_hashes) | set(hashes) if old_hashes.get(key) != hashes.get(key)}
+    # Older snapshots have no checkpoint, so rebuild their index once.
+    if "_memory_index" not in (previous_project or {}):
+        _request("DELETE", "novelflow_memory_chunks", params={"project_id": f"eq.{project_id}", "owner_id": f"eq.{owner_id()}"})
+    else:
+        for chapter_id in sorted(changed_ids):
+            _request("DELETE", "novelflow_memory_chunks", params={"project_id": f"eq.{project_id}", "owner_id": f"eq.{owner_id()}", "chapter_id": f"eq.{chapter_id}"})
     rows: list[dict[str, Any]] = []
-    for chapter in project.get("chapters", []):
-        if not isinstance(chapter, dict):
+    for chapter_id, chapter in chapters.items():
+        if chapter_id not in changed_ids:
             continue
         chapter_id = str(chapter.get("id", ""))
         title = str(chapter.get("title", "未命名章节"))[:120]
@@ -167,14 +203,19 @@ def save_project(project: dict[str, Any]) -> None:
             })
     for start in range(0, len(rows), 100):
         _request("POST", "novelflow_memory_chunks", json=rows[start:start + 100])
+    if hashes != old_hashes or "_memory_index" not in (previous_project or {}):
+        write_snapshot({**project, "_memory_index": hashes}, payload["updated_at"])
+    project["_memory_index"] = hashes
 
 
-def save_registry(registry: dict[str, Any]) -> None:
+def save_registry(registry: dict[str, Any], previous_projects: dict[str, Any] | None = None) -> None:
     if not ready():
         return
     for project in registry.get("projects", []):
         if isinstance(project, dict) and project.get("id"):
-            save_project(project)
+            previous = (previous_projects or {}).get(str(project["id"]))
+            if previous_projects is None or previous != project:
+                save_project(project, previous)
 
 
 def load_model_profiles() -> list[dict[str, Any]]:
